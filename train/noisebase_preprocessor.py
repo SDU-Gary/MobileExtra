@@ -243,7 +243,7 @@ class NoiseBasePreprocessor:
                     source_image: np.ndarray,
                     motion_vectors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        前向warp投影
+        向量化的前向warp投影（优化版本）
         
         Args:
             source_image: 源图像 [3, H, W]
@@ -258,64 +258,76 @@ class NoiseBasePreprocessor:
         # 初始化输出
         warped_image = np.zeros_like(source_image)
         coverage_mask = np.zeros((H, W), dtype=np.float32)
-        weight_accumulator = np.zeros((H, W), dtype=np.float32)
         
-        # 创建像素坐标网格
+        # 创建坐标网格
         y_coords, x_coords = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
         
         # 计算目标位置
-        target_x = x_coords + motion_vectors[1]  # 注意：motion_vectors是[2,H,W]格式
-        target_y = y_coords + motion_vectors[0]
+        target_x = x_coords + motion_vectors[0]  # [H, W]
+        target_y = y_coords + motion_vectors[1]  # [H, W]
         
-        # 有效像素掩码（在图像边界内）
+        # 有效像素掩码
         valid_mask = (
             (target_x >= 0) & (target_x < W-1) &
             (target_y >= 0) & (target_y < H-1)
         )
         
-        # 前向投影（双线性分布）
-        for y in range(H):
-            for x in range(W):
-                if not valid_mask[y, x]:
-                    continue
-                
-                # 目标位置
-                tx, ty = target_x[y, x], target_y[y, x]
-                
-                # 双线性权重分布
-                x0, y0 = int(np.floor(tx)), int(np.floor(ty))
-                x1, y1 = x0 + 1, y0 + 1
-                
-                # 确保在边界内
-                if x1 >= W or y1 >= H:
-                    continue
-                
-                # 双线性插值权重
-                wx = tx - x0
-                wy = ty - y0
-                
-                weights = [
-                    (1-wx) * (1-wy),  # (x0, y0)
-                    wx * (1-wy),      # (x1, y0)  
-                    (1-wx) * wy,      # (x0, y1)
-                    wx * wy           # (x1, y1)
-                ]
-                
-                positions = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
-                
-                # 分布像素值
-                for (px, py), weight in zip(positions, weights):
-                    if weight > 1e-6:  # 忽略极小权重
-                        warped_image[:, py, px] += source_image[:, y, x] * weight
-                        weight_accumulator[py, px] += weight
+        if not np.any(valid_mask):
+            return warped_image, coverage_mask
+        
+        # 提取有效像素
+        valid_y, valid_x = np.where(valid_mask)
+        valid_target_x = target_x[valid_mask]
+        valid_target_y = target_y[valid_mask]
+        
+        # 双线性插值的四个邻居
+        x0 = np.floor(valid_target_x).astype(int)
+        y0 = np.floor(valid_target_y).astype(int)
+        x1 = x0 + 1
+        y1 = y0 + 1
+        
+        # 确保在边界内
+        boundary_mask = (x1 < W) & (y1 < H)
+        if not np.any(boundary_mask):
+            return warped_image, coverage_mask
+        
+        # 过滤边界外的点
+        valid_y = valid_y[boundary_mask]
+        valid_x = valid_x[boundary_mask]
+        valid_target_x = valid_target_x[boundary_mask]
+        valid_target_y = valid_target_y[boundary_mask]
+        x0, y0, x1, y1 = x0[boundary_mask], y0[boundary_mask], x1[boundary_mask], y1[boundary_mask]
+        
+        # 双线性权重
+        wx = valid_target_x - x0
+        wy = valid_target_y - y0
+        
+        weights = [
+            (1-wx) * (1-wy),  # (x0, y0)
+            wx * (1-wy),      # (x1, y0)
+            (1-wx) * wy,      # (x0, y1)
+            wx * wy           # (x1, y1)
+        ]
+        
+        positions = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+        
+        # 向量化分布像素值
+        for (px, py), weight in zip(positions, weights):
+            valid_weight_mask = weight > 1e-6
+            if np.any(valid_weight_mask):
+                # 使用np.add.at进行原子累加
+                for c in range(C):
+                    np.add.at(warped_image[c], (py[valid_weight_mask], px[valid_weight_mask]), 
+                             source_image[c, valid_y[valid_weight_mask], valid_x[valid_weight_mask]] * weight[valid_weight_mask])
+                np.add.at(coverage_mask, (py[valid_weight_mask], px[valid_weight_mask]), weight[valid_weight_mask])
         
         # 归一化
-        valid_pixels = weight_accumulator > 1e-6
+        valid_pixels = coverage_mask > 1e-6
         for c in range(C):
-            warped_image[c, valid_pixels] /= weight_accumulator[valid_pixels]
+            warped_image[c, valid_pixels] /= coverage_mask[valid_pixels]
         
-        # 生成覆盖掩码
-        coverage_mask[valid_pixels] = 1.0
+        # 生成二值覆盖掩码
+        coverage_mask = (coverage_mask > self.hole_threshold).astype(np.float32)
         
         return warped_image, coverage_mask
     

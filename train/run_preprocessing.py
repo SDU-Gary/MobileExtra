@@ -29,7 +29,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "training"))
 
-from training.noisebase_preprocessor import NoiseBasePreprocessor
+from noisebase_preprocessor import NoiseBasePreprocessor
 
 
 def create_data_splits(output_dir: str, scene_name: str, total_frames: int) -> Dict[str, List[int]]:

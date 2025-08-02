@@ -16,6 +16,7 @@
 import zipfile
 import tempfile
 import os
+import shutil
 from pathlib import Path
 import zarr
 import numpy as np
@@ -149,7 +150,7 @@ class CustomZipStore:
 
 def load_zarr_group(zip_path):
     """
-    加载Zarr组，兼容不同版本
+    简化的Zarr组加载方法
     
     Args:
         zip_path: zip文件路径
@@ -157,31 +158,32 @@ def load_zarr_group(zip_path):
     Returns:
         group: Zarr组对象
     """
-    # 尝试多种加载方式，按成功率排序
-    methods = [
-        ("直接zip解压", lambda: _load_with_direct_zip(zip_path)),
-        ("标准ZipStore", lambda: _load_with_zipstore(zip_path)),
-        ("备用方案", lambda: load_zarr_fallback(zip_path))
-    ]
+    if not os.path.exists(zip_path):
+        raise FileNotFoundError(f"文件不存在: {zip_path}")
     
-    last_error = None
+    # 创建临时目录
+    temp_dir = tempfile.mkdtemp()
     
-    for method_name, method_func in methods:
-        try:
-            result = method_func()
-            # 验证结果有必要的属性
-            if _validate_zarr_group(result):
-                print(f"✅ {method_name}加载成功: {Path(zip_path).name}")
-                return result
-            else:
-                print(f"⚠️ {method_name}加载但验证失败: {Path(zip_path).name}")
-                continue
-        except Exception as e:
-            print(f"⚠️ {method_name}失败: {e}")
-            last_error = e
-            continue
-    
-    raise RuntimeError(f"所有加载方法都失败: {zip_path}. 最后错误: {last_error}")
+    try:
+        # 解压zip文件
+        with zipfile.ZipFile(zip_path, 'r') as zip_file:
+            zip_file.extractall(temp_dir)
+        
+        # 直接从目录加载zarr
+        group = zarr.open_group(temp_dir, mode='r')
+        
+        # 简单验证
+        if not _validate_zarr_group(group):
+            raise ValueError(f"Zarr数据验证失败: {zip_path}")
+        
+        print(f"✅ Zarr加载成功: {Path(zip_path).name}")
+        return group
+        
+    except Exception as e:
+        # 清理临时目录
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        raise RuntimeError(f"Zarr加载失败: {zip_path}, 错误: {e}")
 
 
 def _validate_zarr_group(group):
@@ -366,66 +368,49 @@ class FallbackZarrGroup:
 # 便捷函数
 def decompress_RGBE_compat(color, exposures):
     """
-    兼容版本的RGBE解压缩
+    简化版RGBE解压缩
     
     Args:
-        color: RGBE颜色数据
-        exposures: 曝光范围
+        color: RGBE颜色数据 [4, H, W] 或 [4, H, W, S]
+        exposures: 曝光参数 [2]
         
     Returns:
-        color: RGB颜色数据
+        rgb: RGB颜色数据 [3, H, W]
     """
     try:
         # 确保输入是numpy数组
-        if not isinstance(color, np.ndarray):
-            color = np.array(color)
-        if not isinstance(exposures, np.ndarray):
-            exposures = np.array(exposures)
+        color = np.array(color, dtype=np.float32)
+        exposures = np.array(exposures, dtype=np.float32)
         
-        print(f"🎨 RGBE解压缩: color形状={color.shape}, dtype={color.dtype}")
-        print(f"🎨 曝光参数: {exposures}")
+        print(f"🎨 RGBE解压缩: color形状={color.shape}")
         
-        # 检查数组维度
-        if color.ndim < 1 or color.shape[0] < 4:
-            raise ValueError(f"Color数组第0维必须至少有4个通道，实际形状: {color.shape}")
+        # 处理样本维度（如果存在）
+        if color.ndim == 4 and color.shape[-1] > 1:
+            color = color.mean(axis=-1)  # 对样本求平均
+        elif color.ndim == 4 and color.shape[-1] == 1:
+            color = color.squeeze(axis=-1)
         
-        # 提取E通道 (指数)
-        e_channel = color.astype(np.float32)[3]  # 应该是 (H, W, S) 或 (H, W)
-        print(f"🎨 E通道形状: {e_channel.shape}")
+        # 检查维度
+        if color.ndim != 3 or color.shape[0] < 4:
+            raise ValueError(f"期望color形状为[4,H,W]，实际: {color.shape}")
         
-        # 计算指数
-        exponents = (e_channel + 1) / 256
-        exponents = np.exp(exponents * (exposures[1] - exposures[0]) + exposures[0])
-        print(f"🎨 指数形状: {exponents.shape}")
+        # 提取E通道并计算指数
+        e_channel = color[3]
+        exponents = np.exp((e_channel / 255.0) * (exposures[1] - exposures[0]) + exposures[0])
         
-        # 提取RGB通道并应用指数
-        rgb_channels = color.astype(np.float32)[:3]  # (3, H, W, S) 或 (3, H, W)
-        print(f"🎨 RGB通道形状: {rgb_channels.shape}")
+        # 应用到RGB通道
+        rgb = color[:3] / 255.0
+        rgb = rgb * exponents[np.newaxis, :, :]
         
-        # 应用指数解压缩
-        if exponents.ndim == rgb_channels.ndim - 1:
-            # 需要添加一个维度进行广播
-            color_result = rgb_channels / 255.0 * exponents[np.newaxis]
-        else:
-            # 直接相乘
-            color_result = rgb_channels / 255.0 * exponents
-        
-        print(f"🎨 解压缩结果形状: {color_result.shape}")
-        return color_result
+        print(f"🎨 解压缩成功: {rgb.shape}")
+        return rgb
         
     except Exception as e:
         print(f"❌ RGBE解压缩失败: {e}")
-        print(f"   Color形状: {getattr(color, 'shape', 'N/A')}")
-        print(f"   Exposures: {exposures}")
-        
-        # 返回一个安全的默认值
-        if hasattr(color, 'shape') and len(color.shape) >= 1:
-            if color.ndim == 4:
-                return np.zeros((3, color.shape[1], color.shape[2], color.shape[3]), dtype=np.float32)
-            elif color.ndim == 3:
-                return np.zeros((3, color.shape[1], color.shape[2]), dtype=np.float32)
-            else:
-                return np.zeros((3, 64, 64), dtype=np.float32)
+        # 返回安全默认值
+        if hasattr(color, 'shape') and len(color.shape) >= 2:
+            H, W = color.shape[-2], color.shape[-1]
+            return np.zeros((3, H, W), dtype=np.float32)
         else:
             return np.zeros((3, 64, 64), dtype=np.float32)
 
