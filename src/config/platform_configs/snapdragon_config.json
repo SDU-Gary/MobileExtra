@@ -1,0 +1,61 @@
+{
+  /**
+   * @file snapdragon_config.json
+   * @brief 高通骁龙平台配置文件
+   * 
+   * 配置说明：
+   * - 针对高通骁龙8系列/7系列芯片优化
+   * - Adreno GPU + Hexagon NPU异构配置
+   * - 温度和功耗管理参数
+   * - 性能分级和降级策略
+   * 
+   * 支持芯片：
+   * - 骁龙8 Gen2/Gen1: 旗舰配置
+   * - 骁龙7+ Gen3/Gen2: 高端配置  
+   * - 骁龙6 Gen1: 中端配置
+   * 
+   * 优化重点：
+   * - Hexagon NPU最大化利用
+   * - Adreno GPU计算优化
+   * - LPDDR5内存带宽优化
+   * - 5G功耗管理
+   * 
+   * @author 配置管理团队
+   * @date 2025-07-28
+   * @version 1.0
+   */
+  
+  "platform_info": {
+    "chip_vendor": "Qualcomm",
+    "chip_series": "Snapdragon",
+    "supported_models": ["SM8550", "SM8475", "SM8450", "SM7475"],
+    "min_android_version": "10.0"
+  },
+  
+  "performance_config": {
+    "max_gpu_memory_mb": 200,
+    "max_system_memory_mb": 150,
+    "max_network_parameters": 3000000,
+    "target_fps": 120,
+    "max_latency_ms": 8
+  },
+  
+  "degradation_thresholds": {
+    "temperature_warning": 45.0,
+    "temperature_critical": 50.0,  
+    "battery_warning": 15.0,
+    "battery_critical": 10.0,
+    "npu_utilization_limit": 85.0,
+    "gpu_utilization_limit": 90.0
+  },
+  
+  "optimization_params": {
+    "resolution_scale_factors": [1.0, 0.875, 0.75, 0.625, 0.5],
+    "supported_precisions": ["FP16", "INT8", "INT4"],
+    "supports_compute_shader": true,
+    "preferred_npu_backend": "SNPE",
+    "gpu_texture_formats": ["RGBA8", "RG16F", "R32F"]
+  },
+  
+  "TODO": "完善骁龙平台的详细配置参数"
+}

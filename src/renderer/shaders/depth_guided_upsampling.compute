@@ -1,0 +1,30 @@
+/**
+ * @file depth_guided_upsampling.compute
+ * @brief 深度引导空间超分计算着色器
+ * 
+ * 功能描述：
+ * - 将低分辨率深度上采样到全分辨率
+ * - 基于深度梯度和颜色信息进行引导
+ * - 在边缘区域进行精细化调整
+ * - 保证深度连续性和空间一致性
+ * 
+ * 算法特点：
+ * - 双线性插值基础上的深度引导优化
+ * - 边缘权重自适应调整
+ * - 颜色相似性约束
+ * - 深度不连续区域特殊处理
+ * 
+ * 性能目标：
+ * - 处理延迟: <0.5ms
+ * - 精度保持: >95% vs 全分辨率
+ * 
+ * @author 图形引擎团队
+ * @date 2025-07-28
+ * @version 1.0
+ */
+
+#version 450 core
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// TODO: 实现深度引导超分算法
+// 参考design.md中的depth_guided_upsampling.compute实现

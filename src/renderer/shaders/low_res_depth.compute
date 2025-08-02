@@ -1,0 +1,30 @@
+/**
+ * @file low_res_depth.compute
+ * @brief 低分辨率深度生成计算着色器
+ * 
+ * 功能描述：
+ * - 将全分辨率深度缓冲下采样到1/4分辨率
+ * - 计算深度引导特征用于后续超分
+ * - 使用最近深度值策略保证精度
+ * - 生成深度梯度和颜色方差信息
+ * 
+ * 技术创新：
+ * - 深度引导的空间超分算法核心
+ * - 极大降低GPU显存带宽占用
+ * - 减少片元填充开销
+ * - 保证外插帧空间一致性>95%
+ * 
+ * 工作组大小：16x16
+ * 输入纹理：u_FullResDepth, u_FullResRGB
+ * 输出图像：u_LowResDepth, u_DepthGuidanceFeatures
+ * 
+ * @author 图形引擎团队
+ * @date 2025-07-28
+ * @version 1.0
+ */
+
+#version 450 core
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// TODO: 实现低分辨率深度生成算法
+// 参考design.md中的low_res_depth.compute实现

@@ -1,0 +1,67 @@
+{
+  /**
+   * @file kirin_config.json
+   * @brief 华为麒麟芯片配置文件
+   * 
+   * 配置说明：
+   * - 针对华为麒麟9000/990系列优化
+   * - Mali GPU + Da Vinci NPU异构配置
+   * - 华为自研架构适配
+   * - GPU Turbo游戏优化集成
+   * 
+   * 支持芯片：
+   * - 麒麟9000系列: 旗舰配置
+   * - 麒麟990系列: 高端配置
+   * - 麒麟985: 标准配置
+   * 
+   * 优化重点：
+   * - Da Vinci NPU最大化利用
+   * - Mali G78/G76计算优化
+   * - HiSilicon ISP集成
+   * - GPU Turbo性能提升
+   * 
+   * 注意事项：
+   * - 受限于Google服务限制
+   * - 主要面向中国市场
+   * - HMS Core生态集成
+   * 
+   * @author 配置管理团队
+   * @date 2025-07-28
+   * @version 1.0
+   */
+  
+  "platform_info": {
+    "chip_vendor": "HiSilicon",
+    "chip_series": "Kirin", 
+    "supported_models": ["Kirin9000", "Kirin990", "Kirin985"],
+    "min_emui_version": "11.0"
+  },
+  
+  "performance_config": {
+    "max_gpu_memory_mb": 190,
+    "max_system_memory_mb": 145,
+    "max_network_parameters": 2900000,
+    "target_fps": 90,
+    "max_latency_ms": 9.0
+  },
+  
+  "degradation_thresholds": {
+    "temperature_warning": 44.0,
+    "temperature_critical": 49.0,
+    "battery_warning": 15.0,
+    "battery_critical": 10.0,
+    "davinci_npu_utilization_limit": 82.0,
+    "mali_gpu_utilization_limit": 88.0
+  },
+  
+  "optimization_params": {
+    "resolution_scale_factors": [1.0, 0.8, 0.65, 0.55, 0.45],
+    "supported_precisions": ["FP16", "INT8"],
+    "supports_compute_shader": true,
+    "preferred_npu_backend": "HiAI",
+    "gpu_turbo_support": true,
+    "mali_gpu_version": "G78MP24"
+  },
+  
+  "TODO": "完善麒麟平台的Da Vinci NPU和Mali GPU配置"
+}

@@ -1,0 +1,74 @@
+# training_config.yaml
+# 训练配置文件
+#
+# 配置说明：
+# - 超参数设置和训练策略
+# - 数据集路径和预处理参数
+# - 网络架构和损失函数配置
+# - 知识蒸馏和量化训练设置
+#
+# 训练阶段：
+# - 第一阶段: Teacher网络训练
+# - 第二阶段: Student网络知识蒸馏
+# - 第三阶段: 量化感知训练
+#
+# 性能目标：
+# - 训练收敛: <100 epochs
+# - 验证指标: SSIM>0.95, PSNR>35dB
+# - 蒸馏保持率: >95%
+#
+# @author AI算法团队
+# @date 2025-07-28
+# @version 1.0
+
+# 训练数据配置
+dataset:
+  data_root: "./data/game_scenes"
+  train_split: "./data/splits/train.txt"
+  val_split: "./data/splits/val.txt"
+  test_split: "./data/splits/test.txt"
+  patch_size: 64
+  sequence_length: 5
+  
+# 网络架构配置  
+model:
+  inpainting_network:
+    input_channels: 6  # RGB(3) + Mask(1) + ResidualMV(2)
+    output_channels: 3  # RGB
+    parameter_budget: 3000000  # 3.0M参数
+    architecture: "UNet_GatedConv_FFC"  # U-Net + Gated Convolution + FFC
+    
+  color_stabilizer:
+    input_channels: 3
+    lut_size: 8  # 8x8x8 LUT
+    parameter_budget: 700000  # 0.7M参数
+
+# 训练超参数
+training:
+  batch_size: 32
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  max_epochs: 100
+  
+  # 损失函数权重
+  loss_weights:
+    reconstruction: 1.0
+    perceptual: 0.1  
+    temporal_consistency: 0.05
+    distillation: 0.2
+
+# 知识蒸馏配置
+distillation:
+  teacher_model_path: "./models/teacher_model.pth"
+  temperature: 4.0
+  feature_distillation: true
+  output_distillation: true
+
+# 量化训练配置  
+quantization:
+  enabled: true
+  precision: "INT8"
+  calibration_dataset_size: 1000
+  quantization_aware_training: true
+
+# TODO: 完善训练配置的详细参数设置
