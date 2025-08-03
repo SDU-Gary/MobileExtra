@@ -538,7 +538,7 @@ def main():
     print("🚀 测试根据任务书修正后的预处理实现...")
     
     # 创建预处理器
-    output_dir = Path("/tmp/test_corrected_implementation")
+    output_dir = Path("../tmp/test_corrected_implementation")
     preprocessor = NoiseBasePreprocessorCorrected(
         input_dir=str(Path("/tmp/dummy")),
         output_dir=str(output_dir),
