@@ -11,6 +11,7 @@
 /dist/
 /out/
 /data/
+/tmp/
 
 # 依赖管理
 /node_modules/
