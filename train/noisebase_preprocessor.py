@@ -225,17 +225,33 @@ class NoiseBasePreprocessor:
         Returns:
             screen_mv: 屏幕空间运动矢量 [2, H, W]
         """
-        height, width = curr_frame['position'].shape[1:3]
+        # 获取位置和运动数据
+        curr_position = curr_frame['position']
+        curr_motion = curr_frame['motion']
+        
+        # 确保数据有样本维度 (projective.py期望3HWS格式)
+        if curr_position.ndim == 3:
+            # 添加样本维度 [3, H, W] -> [3, H, W, 1]
+            curr_position = curr_position[..., np.newaxis]
+        if curr_motion.ndim == 3:
+            # 添加样本维度 [3, H, W] -> [3, H, W, 1]
+            curr_motion = curr_motion[..., np.newaxis]
+        
+        height, width = curr_position.shape[1:3]
         
         # 使用projective.py中的函数计算运动矢量
         screen_mv = motion_vectors(
-            w_position=curr_frame['position'],
-            w_motion=curr_frame['motion'],
+            w_position=curr_position,
+            w_motion=curr_motion,
             pv=curr_frame['view_proj_mat'],
             prev_pv=prev_frame['view_proj_mat'],
             height=height,
             width=width
         )
+        
+        # 移除样本维度并返回 [2, H, W, 1] -> [2, H, W]
+        if screen_mv.ndim == 4 and screen_mv.shape[3] == 1:
+            screen_mv = screen_mv.squeeze(axis=3)
         
         return screen_mv
     
