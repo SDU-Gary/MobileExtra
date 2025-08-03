@@ -6,10 +6,28 @@ NoiseBase预处理的核心目标是：**从光线追踪帧生成外推帧的空
 
 ```
 输入: NoiseBase光线追踪数据 (frame0000.zip, frame0001.zip, ...)
-输出: 6通道训练数据 [RGB(3) + Mask(1) + ResidualMV(2)]
+输出: 7通道训练数据 [RGB(3) + HoleMask(1) + OcclusionMask(1) + ResidualMV(2)]
 ```
 
-## 🔄 **7步核心处理流程**
+## 🔍 **重要概念区分**
+
+### **空洞 (Holes) vs 遮挡掩码 (Occlusion Mask)**
+
+这是两个完全不同的概念，不应混淆：
+
+#### **1. 空洞 (Holes)**
+- **定义**: 前向warp后图像中**没有被任何像素覆盖**的区域
+- **成因**: 几何变换导致的像素分布不均
+- **检测方法**: 基于覆盖度阈值的纯几何检测
+- **特征**: 完全没有颜色信息的区域
+
+#### **2. 遮挡掩码 (Occlusion Mask)**  
+- **定义**: 由于**物体遮挡关系变化**导致的区域
+- **成因**: 物体在3D空间中的相对位置变化
+- **检测方法**: 基于深度不连续性和运动不一致性
+- **特征**: 在前一帧可见但当前帧被遮挡，或相反
+
+## 🔄 **8步核心处理流程**
 
 ### **步骤1: 数据加载与解压**
 ```python
@@ -135,29 +153,70 @@ residual_mv[0][valid_mask] = motion_vectors[0][valid_mask] * error_factor[valid_
 residual_mv[1][valid_mask] = motion_vectors[1][valid_mask] * error_factor[valid_mask] * 0.1
 ```
 
-### **步骤6: 6通道训练数据组装**
+### **步骤6: 空洞检测 (方法1)**
 ```python
-def create_training_sample(self, rgb_image, hole_mask, residual_mv) -> np.ndarray:
+def detect_holes_and_occlusion(self, warped_image, target_image, coverage_mask, curr_frame, prev_frame):
+```
+
+**功能**: 基于覆盖度的纯几何空洞检测
+
+```python
+# 方法1: 几何空洞检测
+hole_mask = (coverage_mask < self.hole_threshold).astype(np.float32)
+
+# 形态学处理优化
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+hole_mask = cv2.morphologyEx(hole_mask, cv2.MORPH_CLOSE, kernel)
+```
+
+### **步骤7: 遮挡掩码检测 (方法2)**
+```python
+def detect_occlusion_mask(self, curr_frame, prev_frame):
+```
+
+**功能**: 基于深度和运动不一致性的遮挡检测
+
+```python
+# 方法1: 基于深度不连续性
+depth_gradient = np.gradient(curr_depth)
+depth_discontinuity = np.sqrt(depth_gradient[0]**2 + depth_gradient[1]**2)
+depth_occlusion = (depth_discontinuity > np.percentile(depth_discontinuity, 95))
+
+# 方法2: 基于运动不一致性
+motion_discontinuity = np.sqrt(motion_grad_x[0]**2 + motion_grad_x[1]**2 + 
+                              motion_grad_y[0]**2 + motion_grad_y[1]**2)
+motion_occlusion = (motion_discontinuity > np.percentile(motion_discontinuity, 90))
+
+# 结合两种方法
+occlusion_mask = (depth_occlusion | motion_occlusion).astype(np.float32)
+```
+
+### **步骤8: 7通道训练数据组装**
+```python
+def create_training_sample(self, rgb_image, hole_mask, occlusion_mask, residual_mv):
 ```
 
 **功能**: 组装最终的训练数据
 
 ```python
 training_sample = np.concatenate([
-    rgb_image,                           # RGB通道 [3, H, W] - 外推帧RGB
-    hole_mask[np.newaxis, :, :],        # 掩码通道 [1, H, W] - 遮挡掩码
-    residual_mv                         # 残差MV通道 [2, H, W] - 运动补偿
-], axis=0)  # 最终: [6, H, W]
+    rgb_image,                              # RGB通道 [3, H, W] - 外推帧RGB
+    hole_mask[np.newaxis, :, :],           # 空洞掩码通道 [1, H, W] - 几何空洞
+    occlusion_mask[np.newaxis, :, :],      # 遮挡掩码通道 [1, H, W] - 语义遮挡
+    residual_mv                            # 残差MV通道 [2, H, W] - 运动补偿
+], axis=0)  # 最终: [7, H, W]
 ```
 
-### **步骤7: 数据保存与可视化**
+### **步骤9: 数据保存与可视化**
 
 **保存内容**:
 - `rgb/`: 原始RGB图像
 - `warped/`: 外推后RGB图像  
-- `masks/`: 空洞掩码
+- `masks/`: 空洞掩码和遮挡掩码
+  - `*_holes.png`: 几何空洞掩码
+  - `*_occlusion.png`: 语义遮挡掩码
 - `residual_mv/`: 残差运动矢量
-- `training_data/`: 6通道训练数据 (.npy格式)
+- `training_data/`: 7通道训练数据 (.npy格式)
 - `visualization/`: 可视化结果
 
 ## 🎯 **关键技术点**
@@ -176,12 +235,31 @@ training_sample = np.concatenate([
 - **重叠问题**: 多个像素投影到同一位置 → 权重累积
 - **亚像素精度**: 投影位置非整数 → 双线性分布
 
-### **2. 遮挡掩码生成逻辑**
+### **2. 空洞检测 vs 遮挡检测的区别**
 
+#### **空洞检测 (几何方法)**
+**判据**: 覆盖权重不足 (`coverage < threshold`)
+```python
+hole_mask = (coverage_mask < self.hole_threshold).astype(np.float32)
+```
+
+#### **遮挡检测 (语义方法)**
 **多重判据**:
-1. **几何遮挡**: 覆盖权重不足 (`coverage < threshold`)
-2. **语义遮挡**: 颜色差异过大 (`color_diff > threshold`)
+1. **深度不连续性**: 相邻像素深度差异过大
+2. **运动不一致性**: 相邻像素运动矢量差异过大
 3. **形态优化**: 形态学操作平滑掩码
+
+```python
+# 深度不连续性检测
+depth_gradient = np.gradient(curr_depth)
+depth_discontinuity = np.sqrt(depth_gradient[0]**2 + depth_gradient[1]**2)
+depth_occlusion = (depth_discontinuity > np.percentile(depth_discontinuity, 95))
+
+# 运动不一致性检测
+motion_discontinuity = np.sqrt(motion_grad_x[0]**2 + motion_grad_x[1]**2 + 
+                              motion_grad_y[0]**2 + motion_grad_y[1]**2)
+motion_occlusion = (motion_discontinuity > np.percentile(motion_discontinuity, 90))
+```
 
 **掩码含义**:
 - `1`: 空洞区域，需要补全
