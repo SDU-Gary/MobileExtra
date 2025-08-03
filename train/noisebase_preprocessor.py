@@ -347,51 +347,132 @@ class NoiseBasePreprocessor:
         
         return warped_image, coverage_mask
     
-    def detect_holes_and_compute_residuals(self,
-                                         warped_image: np.ndarray,
-                                         target_image: np.ndarray,
-                                         coverage_mask: np.ndarray,
-                                         motion_vectors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def detect_holes_and_occlusion(self,
+                                 warped_image: np.ndarray,
+                                 target_image: np.ndarray,
+                                 coverage_mask: np.ndarray,
+                                 curr_frame: Dict,
+                                 prev_frame: Dict) -> Tuple[np.ndarray, np.ndarray]:
         """
-        检测空洞并计算残差运动矢量
+        分别检测空洞和遮挡掩码
+        
+        Args:
+            warped_image: warp后图像 [3, H, W]
+            target_image: 目标图像 [3, H, W]
+            coverage_mask: 覆盖掩码 [H, W]
+            curr_frame: 当前帧数据
+            prev_frame: 前一帧数据
+        
+        Returns:
+            hole_mask: 空洞掩码 [H, W] (1=空洞, 0=有效)
+            occlusion_mask: 遮挡掩码 [H, W] (1=遮挡, 0=无遮挡)
+        """
+        H, W = coverage_mask.shape
+        
+        # === 方法1: 几何空洞检测 ===
+        # 基于覆盖度的纯几何空洞
+        hole_mask = (coverage_mask < self.hole_threshold).astype(np.float32)
+        
+        # 形态学处理优化空洞掩码
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        hole_mask = cv2.morphologyEx(hole_mask, cv2.MORPH_CLOSE, kernel)
+        hole_mask = cv2.morphologyEx(hole_mask, cv2.MORPH_OPEN, kernel)
+        
+        # === 方法2: 遮挡检测 ===
+        occlusion_mask = self.detect_occlusion_mask(curr_frame, prev_frame)
+        
+        return hole_mask, occlusion_mask
+    
+    def detect_occlusion_mask(self, curr_frame: Dict, prev_frame: Dict) -> np.ndarray:
+        """
+        基于深度和几何关系检测遮挡掩码
+        
+        Args:
+            curr_frame: 当前帧数据
+            prev_frame: 前一帧数据
+            
+        Returns:
+            occlusion_mask: 遮挡掩码 [H, W]
+        """
+        H, W = curr_frame['position'].shape[1:3]
+        
+        # 获取深度信息（从世界空间位置计算）
+        curr_depth = self.compute_depth_from_position(
+            curr_frame['position'], curr_frame['camera_pos']
+        )
+        prev_depth = self.compute_depth_from_position(
+            prev_frame['position'], prev_frame['camera_pos']
+        )
+        
+        # 方法1: 基于深度不连续性检测遮挡
+        depth_gradient = np.gradient(curr_depth)
+        depth_discontinuity = np.sqrt(depth_gradient[0]**2 + depth_gradient[1]**2)
+        depth_occlusion = (depth_discontinuity > np.percentile(depth_discontinuity, 95))
+        
+        # 方法2: 基于运动不一致性检测遮挡
+        # 计算相邻像素的运动矢量差异
+        motion_x = curr_frame['motion'][0]
+        motion_y = curr_frame['motion'][1]
+        
+        motion_grad_x = np.gradient(motion_x)
+        motion_grad_y = np.gradient(motion_y)
+        motion_discontinuity = np.sqrt(
+            motion_grad_x[0]**2 + motion_grad_x[1]**2 + 
+            motion_grad_y[0]**2 + motion_grad_y[1]**2
+        )
+        motion_occlusion = (motion_discontinuity > np.percentile(motion_discontinuity, 90))
+        
+        # 结合两种方法
+        occlusion_mask = (depth_occlusion | motion_occlusion).astype(np.float32)
+        
+        # 形态学处理
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        occlusion_mask = cv2.morphologyEx(occlusion_mask, cv2.MORPH_CLOSE, kernel)
+        occlusion_mask = cv2.morphologyEx(occlusion_mask, cv2.MORPH_OPEN, kernel)
+        
+        return occlusion_mask
+    
+    def compute_depth_from_position(self, world_position: np.ndarray, camera_pos: np.ndarray) -> np.ndarray:
+        """
+        从世界空间位置计算深度
+        
+        Args:
+            world_position: 世界空间位置 [3, H, W]
+            camera_pos: 相机位置 [3]
+            
+        Returns:
+            depth: 深度图 [H, W]
+        """
+        # 计算到相机的距离作为深度
+        diff = world_position - camera_pos.reshape(3, 1, 1)
+        depth = np.linalg.norm(diff, axis=0)
+        return depth
+    
+    def compute_residual_motion_vectors(self,
+                                      warped_image: np.ndarray,
+                                      target_image: np.ndarray,
+                                      coverage_mask: np.ndarray,
+                                      motion_vectors: np.ndarray,
+                                      hole_mask: np.ndarray) -> np.ndarray:
+        """
+        计算残差运动矢量
         
         Args:
             warped_image: warp后图像 [3, H, W]
             target_image: 目标图像 [3, H, W]
             coverage_mask: 覆盖掩码 [H, W]
             motion_vectors: 原始运动矢量 [2, H, W]
+            hole_mask: 空洞掩码 [H, W]
         
         Returns:
-            hole_mask: 空洞掩码 [H, W] (1=空洞, 0=有效)
             residual_mv: 残差运动矢量 [2, H, W]
         """
-        H, W = coverage_mask.shape
-        
-        # 1. 基于覆盖的空洞检测
-        hole_mask = (coverage_mask < self.hole_threshold).astype(np.float32)
-        
-        # 2. 基于颜色差异的空洞细化
-        if np.any(coverage_mask > 0):
-            # 计算颜色差异
-            color_diff = np.linalg.norm(warped_image - target_image, axis=0)
-            color_diff_normalized = color_diff / (np.max(color_diff) + 1e-8)
-            
-            # 结合颜色差异和覆盖信息
-            additional_holes = (color_diff_normalized > 0.3) & (coverage_mask > 0)
-            hole_mask = np.maximum(hole_mask, additional_holes.astype(np.float32))
-        
-        # 3. 形态学处理优化空洞掩码
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        hole_mask = cv2.morphologyEx(hole_mask, cv2.MORPH_CLOSE, kernel)
-        hole_mask = cv2.morphologyEx(hole_mask, cv2.MORPH_OPEN, kernel)
-        
-        # 4. 计算残差运动矢量
         residual_mv = np.zeros_like(motion_vectors)
         
-        # 对于有效区域，计算warp误差
+        # 对于有效区域（非空洞），计算warp误差
         valid_mask = (coverage_mask > self.hole_threshold) & (hole_mask < 0.5)
         if np.any(valid_mask):
-            # 简化的残差计算：基于颜色差异
+            # 基于颜色差异计算残差
             color_error = np.linalg.norm(warped_image - target_image, axis=0)
             error_factor = np.clip(color_error / self.residual_threshold, 0, 1)
             
@@ -399,28 +480,31 @@ class NoiseBasePreprocessor:
             residual_mv[0][valid_mask] = motion_vectors[0][valid_mask] * error_factor[valid_mask] * 0.1
             residual_mv[1][valid_mask] = motion_vectors[1][valid_mask] * error_factor[valid_mask] * 0.1
         
-        return hole_mask, residual_mv
+        return residual_mv
     
     def create_training_sample(self,
                              rgb_image: np.ndarray,
                              hole_mask: np.ndarray,
+                             occlusion_mask: np.ndarray,
                              residual_mv: np.ndarray) -> np.ndarray:
         """
-        创建6通道训练样本
+        创建7通道训练样本
         
         Args:
             rgb_image: RGB图像 [3, H, W]  
             hole_mask: 空洞掩码 [H, W]
+            occlusion_mask: 遮挡掩码 [H, W]
             residual_mv: 残差运动矢量 [2, H, W]
         
         Returns:
-            training_sample: 6通道训练数据 [6, H, W]
+            training_sample: 7通道训练数据 [7, H, W]
         """
-        # 拼接6通道数据：RGB(3) + Mask(1) + ResidualMV(2)
+        # 拼接7通道数据：RGB(3) + HoleMask(1) + OcclusionMask(1) + ResidualMV(2)
         training_sample = np.concatenate([
-            rgb_image,                           # RGB通道 [3, H, W]
-            hole_mask[np.newaxis, :, :],        # 掩码通道 [1, H, W]  
-            residual_mv                         # 残差MV通道 [2, H, W]
+            rgb_image,                              # RGB通道 [3, H, W]
+            hole_mask[np.newaxis, :, :],           # 空洞掩码通道 [1, H, W]  
+            occlusion_mask[np.newaxis, :, :],      # 遮挡掩码通道 [1, H, W]
+            residual_mv                            # 残差MV通道 [2, H, W]
         ], axis=0)
         
         return training_sample
@@ -430,6 +514,7 @@ class NoiseBasePreprocessor:
                           rgb_image: np.ndarray,
                           warped_image: np.ndarray,
                           hole_mask: np.ndarray,
+                          occlusion_mask: np.ndarray,
                           residual_mv: np.ndarray,
                           training_sample: np.ndarray):
         """
@@ -440,6 +525,7 @@ class NoiseBasePreprocessor:
             rgb_image: 原始RGB图像
             warped_image: warp后图像
             hole_mask: 空洞掩码
+            occlusion_mask: 遮挡掩码
             residual_mv: 残差运动矢量
             training_sample: 训练样本
         """
@@ -467,8 +553,12 @@ class NoiseBasePreprocessor:
                    cv2.cvtColor(warped_save, cv2.COLOR_RGB2BGR))
         
         # 空洞掩码
-        mask_save = (hole_mask * 255).astype(np.uint8)
-        cv2.imwrite(str(base_path / 'masks' / f"{frame_name}.png"), mask_save)
+        hole_mask_save = (hole_mask * 255).astype(np.uint8)
+        cv2.imwrite(str(base_path / 'masks' / f"{frame_name}_holes.png"), hole_mask_save)
+        
+        # 遮挡掩码
+        occlusion_mask_save = (occlusion_mask * 255).astype(np.uint8)
+        cv2.imwrite(str(base_path / 'masks' / f"{frame_name}_occlusion.png"), occlusion_mask_save)
         
         # 残差运动矢量（保存为NumPy数组）
         np.save(str(base_path / 'residual_mv' / f"{frame_name}.npy"), residual_mv)
@@ -477,13 +567,14 @@ class NoiseBasePreprocessor:
         np.save(str(base_path / 'training_data' / f"{frame_name}.npy"), training_sample)
         
         # 可视化结果
-        self.create_visualization(frame_idx, rgb_image, warped_image, hole_mask, residual_mv)
+        self.create_visualization(frame_idx, rgb_image, warped_image, hole_mask, occlusion_mask, residual_mv)
     
     def create_visualization(self,
                            frame_idx: int,
                            rgb_image: np.ndarray,
                            warped_image: np.ndarray, 
                            hole_mask: np.ndarray,
+                           occlusion_mask: np.ndarray,
                            residual_mv: np.ndarray):
         """
         创建可视化结果
@@ -493,11 +584,12 @@ class NoiseBasePreprocessor:
             rgb_image: 原始图像
             warped_image: warp后图像
             hole_mask: 空洞掩码
+            occlusion_mask: 遮挡掩码
             residual_mv: 残差运动矢量
         """
         import matplotlib.pyplot as plt
         
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
         
         # 原始图像
         rgb_vis = np.clip((rgb_image.transpose(1, 2, 0) + 1) / 2, 0, 1)
@@ -516,6 +608,11 @@ class NoiseBasePreprocessor:
         axes[0, 2].set_title('Hole Mask')
         axes[0, 2].axis('off')
         
+        # 遮挡掩码
+        axes[0, 3].imshow(occlusion_mask, cmap='gray')
+        axes[0, 3].set_title('Occlusion Mask')
+        axes[0, 3].axis('off')
+        
         # 残差运动矢量可视化
         mv_magnitude = np.sqrt(residual_mv[0]**2 + residual_mv[1]**2)
         axes[1, 0].imshow(mv_magnitude, cmap='jet')
@@ -528,12 +625,19 @@ class NoiseBasePreprocessor:
         axes[1, 1].set_title('Residual MV Direction')
         axes[1, 1].axis('off')
         
-        # 覆盖结果
-        overlay = rgb_vis.copy()
-        overlay[hole_mask > 0.5] = [1, 0, 0]  # 红色标记空洞
-        axes[1, 2].imshow(overlay)
+        # 空洞覆盖结果
+        hole_overlay = rgb_vis.copy()
+        hole_overlay[hole_mask > 0.5] = [1, 0, 0]  # 红色标记空洞
+        axes[1, 2].imshow(hole_overlay)
         axes[1, 2].set_title('Holes Overlay')
         axes[1, 2].axis('off')
+        
+        # 遮挡覆盖结果
+        occlusion_overlay = rgb_vis.copy()
+        occlusion_overlay[occlusion_mask > 0.5] = [0, 1, 0]  # 绿色标记遮挡
+        axes[1, 3].imshow(occlusion_overlay)
+        axes[1, 3].set_title('Occlusion Overlay')
+        axes[1, 3].axis('off')
         
         plt.tight_layout()
         
@@ -561,25 +665,31 @@ class NoiseBasePreprocessor:
             curr_frame['reference'], screen_mv
         )
         
-        # 检测空洞并计算残差
-        hole_mask, residual_mv = self.detect_holes_and_compute_residuals(
-            warped_image, curr_frame['reference'], coverage_mask, screen_mv
+        # 分别检测空洞和遮挡掩码
+        hole_mask, occlusion_mask = self.detect_holes_and_occlusion(
+            warped_image, curr_frame['reference'], coverage_mask, curr_frame, prev_frame
+        )
+        
+        # 计算残差运动矢量
+        residual_mv = self.compute_residual_motion_vectors(
+            warped_image, curr_frame['reference'], coverage_mask, screen_mv, hole_mask
         )
         
         # 创建训练样本
         training_sample = self.create_training_sample(
-            curr_frame['reference'], hole_mask, residual_mv
+            curr_frame['reference'], hole_mask, occlusion_mask, residual_mv
         )
         
         # 保存结果
         self.save_frame_results(
             curr_idx, curr_frame['reference'], warped_image, 
-            hole_mask, residual_mv, training_sample
+            hole_mask, occlusion_mask, residual_mv, training_sample
         )
         
         return {
             'frame_idx': curr_idx,
             'hole_coverage': np.mean(hole_mask),
+            'occlusion_coverage': np.mean(occlusion_mask),
             'mv_magnitude': np.mean(np.sqrt(residual_mv[0]**2 + residual_mv[1]**2))
         }
     
