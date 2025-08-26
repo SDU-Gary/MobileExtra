@@ -90,7 +90,7 @@ class KnowledgeDistillationTrainer(pl.LightningModule):
         # 创建Student模型
         print("Creating student model...")
         self.student_model = MobileInpaintingNetwork(
-            input_channels=student_config.get('input_channels', 6),
+            input_channels=student_config.get('input_channels', 7),
             output_channels=student_config.get('output_channels', 3)
         )
         

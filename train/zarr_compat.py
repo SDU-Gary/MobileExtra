@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
 """
-@file zarr_compat.py
-@brief Zarr版本兼容性处理
-
-功能描述：
-- 处理不同版本Zarr的API差异
-- 提供统一的ZipStore接口
-- 兼容Zarr 2.x和3.x版本
-
-@author AI算法团队
-@date 2025-07-28
-@version 1.0
+Zarr version compatibility layer for handling API differences between versions.
 """
 
 import zipfile
@@ -23,7 +13,7 @@ import numpy as np
 
 
 def get_zarr_version():
-    """获取Zarr版本"""
+    """Get current Zarr version"""
     try:
         return zarr.__version__
     except AttributeError:
@@ -31,55 +21,40 @@ def get_zarr_version():
 
 
 def create_zip_store(zip_path, mode='r'):
-    """
-    创建兼容的ZipStore
-    
-    Args:
-        zip_path: zip文件路径
-        mode: 打开模式
-        
-    Returns:
-        store: Zarr存储对象
-    """
+    """Create compatible ZipStore for different Zarr versions"""
     zarr_version = get_zarr_version()
     
-    # 确保使用正确的只读模式
+    # Force read-only mode for zip files
     if mode in ['r+', 'w', 'a']:
-        mode = 'r'  # zip文件通常是只读的
+        mode = 'r'
     
     try:
-        # 尝试Zarr 2.x的方式
+        # Try Zarr 2.x approach
         from zarr import ZipStore
         store = ZipStore(zip_path, mode=mode)
-        print(f"✅ 使用Zarr 2.x ZipStore加载: {zip_path}")
+        print(f"[INFO] Using Zarr 2.x ZipStore: {zip_path}")
         return store
     except ImportError:
         try:
-            # 尝试Zarr 3.x的方式
+            # Try Zarr 3.x approach
             from zarr.storage import ZipStore
             store = ZipStore(zip_path, mode=mode)
-            print(f"✅ 使用Zarr 3.x ZipStore加载: {zip_path}")
+            print(f"[INFO] Using Zarr 3.x ZipStore: {zip_path}")
             return store
         except ImportError:
-            # 如果都不行，使用自定义实现
-            print(f"⚠️ 使用自定义ZipStore实现: {zip_path}")
+            # Fallback to custom implementation
+            print(f"[WARN] Using custom ZipStore fallback: {zip_path}")
             return CustomZipStore(zip_path, mode=mode)
     except Exception as e:
-        print(f"⚠️ 标准ZipStore失败，使用自定义实现: {e}")
+        print(f"[WARN] Standard ZipStore failed, using fallback: {e}")
         return CustomZipStore(zip_path, mode=mode)
 
 
 class CustomZipStore:
-    """自定义ZipStore实现，兼容不同Zarr版本"""
+    """Custom ZipStore implementation compatible with different Zarr versions"""
     
     def __init__(self, zip_path, mode='r'):
-        """
-        初始化自定义ZipStore
-        
-        Args:
-            zip_path: zip文件路径
-            mode: 打开模式
-        """
+        """Initialize custom ZipStore"""
         self.zip_path = str(zip_path)
         self.mode = mode
         self._temp_dir = None
@@ -89,36 +64,33 @@ class CustomZipStore:
             self._extract_zip()
     
     def _extract_zip(self):
-        """提取zip文件到临时目录"""
+        """Extract zip file to temporary directory"""
         if not os.path.exists(self.zip_path):
             raise FileNotFoundError(f"Zip file not found: {self.zip_path}")
         
-        # 创建临时目录
+        # Create temporary directory and extract
         self._temp_dir = tempfile.mkdtemp()
         
-        # 提取zip文件
         with zipfile.ZipFile(self.zip_path, 'r') as zip_file:
             zip_file.extractall(self._temp_dir)
         
-        print(f"提取zip文件到: {self._temp_dir}")
+        print(f"Extracted to: {self._temp_dir}")
     
     def __getitem__(self, key):
-        """获取数据项"""
+        """Get data item by key"""
         if self._temp_dir is None:
             raise RuntimeError("Store not properly initialized")
         
-        # 查找文件
         file_path = Path(self._temp_dir) / key
         
         if file_path.exists():
-            # 读取二进制数据
             with open(file_path, 'rb') as f:
                 return f.read()
         else:
             raise KeyError(f"Key not found: {key}")
     
     def __contains__(self, key):
-        """检查是否包含key"""
+        """Check if key exists"""
         if self._temp_dir is None:
             return False
         
@@ -126,7 +98,7 @@ class CustomZipStore:
         return file_path.exists()
     
     def keys(self):
-        """获取所有key"""
+        """Get all available keys"""
         if self._temp_dir is None:
             return []
         
@@ -134,193 +106,242 @@ class CustomZipStore:
         for root, dirs, files in os.walk(self._temp_dir):
             for file in files:
                 rel_path = os.path.relpath(os.path.join(root, file), self._temp_dir)
-                keys.append(rel_path.replace('\\', '/'))  # 使用正斜杠
+                keys.append(rel_path.replace('\\', '/'))  # Use forward slashes
         
         return keys
     
     def __del__(self):
-        """清理临时文件"""
+        """Cleanup temporary files"""
         if self._temp_dir and os.path.exists(self._temp_dir):
             import shutil
             try:
                 shutil.rmtree(self._temp_dir)
             except Exception:
-                pass  # 静默失败
+                pass  # Silent cleanup
+
+
+class ManagedZarrGroup:
+    """Managed Zarr group wrapper with temporary directory cleanup"""
+    
+    def __init__(self, zip_path):
+        self.zip_path = zip_path
+        self.temp_dir = None
+        self.group = None
+        self._load_group()
+    
+    def _load_group(self):
+        """Load zarr group and create temporary directory"""
+        if not os.path.exists(self.zip_path):
+            raise FileNotFoundError(f"File not found: {self.zip_path}")
+        
+        # Create temporary directory
+        self.temp_dir = tempfile.mkdtemp()
+        
+        try:
+            # Extract zip file
+            with zipfile.ZipFile(self.zip_path, 'r') as zip_file:
+                zip_file.extractall(self.temp_dir)
+            
+            # Load zarr from directory
+            self.group = zarr.open_group(self.temp_dir, mode='r')
+            
+            # Simple validation
+            if not _validate_zarr_group(self.group):
+                raise ValueError(f"Zarr validation failed: {self.zip_path}")
+            
+            print(f"[SUCCESS] Zarr loaded successfully: {Path(self.zip_path).name}")
+            
+        except Exception as e:
+            self.cleanup()
+            raise RuntimeError(f"Zarr loading failed: {self.zip_path}, error: {e}")
+    
+    def cleanup(self):
+        """Immediately cleanup temporary directory"""
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+                print(f"[CLEANUP] Cleaned temporary directory: {os.path.basename(self.temp_dir)}")
+            except Exception as e:
+                print(f"[WARN] Cleanup failed: {e}")
+            finally:
+                self.temp_dir = None
+                self.group = None
+    
+    def __getattr__(self, name):
+        """Proxy to zarr group object"""
+        if self.group is None:
+            raise RuntimeError("Zarr group not initialized or already cleaned")
+        return getattr(self.group, name)
+    
+    def __getitem__(self, key):
+        """Proxy to zarr group object"""
+        if self.group is None:
+            raise RuntimeError("Zarr group not initialized or already cleaned")
+        return self.group[key]
+    
+    def __contains__(self, key):
+        """Proxy to zarr group object"""
+        if self.group is None:
+            raise RuntimeError("Zarr group not initialized or already cleaned")
+        return key in self.group
+    
+    def keys(self):
+        """Proxy to zarr group object"""
+        if self.group is None:
+            raise RuntimeError("Zarr group not initialized or already cleaned")
+        return self.group.keys()
+    
+    def __enter__(self):
+        """Context manager entry"""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with automatic cleanup"""
+        self.cleanup()
+    
+    def __del__(self):
+        """Destructor to ensure cleanup"""
+        self.cleanup()
 
 
 def load_zarr_group(zip_path):
-    """
-    简化的Zarr组加载方法
+    """Load Zarr group (compatibility function)
     
     Args:
-        zip_path: zip文件路径
+        zip_path: Path to zip file
         
     Returns:
-        group: Zarr组对象
+        ManagedZarrGroup: Managed Zarr group object
+        
+    Warning:
+        Returned object requires cleanup() call or use with statement
     """
-    if not os.path.exists(zip_path):
-        raise FileNotFoundError(f"文件不存在: {zip_path}")
-    
-    # 创建临时目录
-    temp_dir = tempfile.mkdtemp()
-    
-    try:
-        # 解压zip文件
-        with zipfile.ZipFile(zip_path, 'r') as zip_file:
-            zip_file.extractall(temp_dir)
-        
-        # 直接从目录加载zarr
-        group = zarr.open_group(temp_dir, mode='r')
-        
-        # 简单验证
-        if not _validate_zarr_group(group):
-            raise ValueError(f"Zarr数据验证失败: {zip_path}")
-        
-        print(f"✅ Zarr加载成功: {Path(zip_path).name}")
-        return group
-        
-    except Exception as e:
-        # 清理临时目录
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        raise RuntimeError(f"Zarr加载失败: {zip_path}, 错误: {e}")
+    return ManagedZarrGroup(zip_path)
 
 
 def _validate_zarr_group(group):
-    """验证zarr组是否包含必要的数据"""
-    required_keys = ['color', 'position', 'reference']
+    """Validate zarr group contains necessary data"""
+    # Basic channels - need at least some of these
+    basic_channels = ['color', 'position', 'motion', 'normal', 'diffuse', 'reference']
     
     try:
         if hasattr(group, 'keys'):
             available_keys = list(group.keys())
         else:
-            # 尝试通过属性访问
-            available_keys = [key for key in required_keys if hasattr(group, key)]
+            # Try attribute access
+            available_keys = [key for key in basic_channels if hasattr(group, key)]
         
-        missing_keys = [key for key in required_keys if key not in available_keys and not hasattr(group, key)]
+        print(f"   Available channels: {available_keys}")
         
-        if missing_keys:
-            print(f"   缺少必要键: {missing_keys}, 可用: {available_keys}")
+        # Check for minimum basic channels
+        found_channels = [key for key in basic_channels if key in available_keys or hasattr(group, key)]
+        
+        if len(found_channels) < 2:  # Need at least 2 channels
+            print(f"   Warning: Only found {len(found_channels)} basic channels: {found_channels}")
             return False
         
+        print(f"   Validation successful: found {len(found_channels)} valid channels")
         return True
         
     except Exception as e:
-        print(f"   验证失败: {e}")
+        print(f"   Validation failed: {e}")
         return False
 
 
 def _load_with_zipstore(zip_path):
-    """使用ZipStore加载"""
+    """Load using ZipStore"""
     store = create_zip_store(zip_path, mode='r')
     group = zarr.group(store=store)
     
-    # 调试：打印组结构
+    # Debug: print group structure
     debug_zarr_structure(group, zip_path)
     
     return group
 
 
 def _load_with_direct_zip(zip_path):
-    """直接解压zip文件加载"""
+    """Load by directly extracting zip file"""
     import tempfile
     import shutil
     
-    # 创建临时目录
+    # Create temporary directory
     temp_dir = tempfile.mkdtemp()
     
     try:
-        # 解压zip文件
+        # Extract zip file
         with zipfile.ZipFile(zip_path, 'r') as zip_file:
             zip_file.extractall(temp_dir)
         
-        # 直接从目录加载zarr
+        # Load zarr directly from directory
         group = zarr.open_group(temp_dir, mode='r')
         
-        # 调试：打印组结构
+        # Debug: print group structure
         debug_zarr_structure(group, zip_path)
         
         return group
     except Exception as e:
-        # 清理临时目录
+        # Cleanup temporary directory
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         raise e
 
 
 def debug_zarr_structure(group, zip_path):
-    """调试zarr组结构"""
+    """Debug zarr group structure"""
     try:
-        print(f"🔍 调试zarr结构 ({zip_path}):")
+        print(f"[DEBUG] Debug zarr structure ({zip_path}):")
         
         if hasattr(group, 'keys'):
             keys = list(group.keys())
-            print(f"   组键: {keys}")
+            print(f"   Group keys: {keys}")
             
-            # 检查每个键的类型
-            for key in keys[:5]:  # 只检查前5个
+            # Check type of each key
+            for key in keys[:5]:  # Only check first 5
                 try:
                     item = group[key]
                     if hasattr(item, 'shape'):
-                        print(f"   {key}: 数组 {item.shape} {item.dtype}")
+                        print(f"   {key}: array {item.shape} {item.dtype}")
                     else:
                         print(f"   {key}: {type(item)}")
                 except Exception as e:
-                    print(f"   {key}: 访问失败 - {e}")
+                    print(f"   {key}: access failed - {e}")
         else:
-            print(f"   组类型: {type(group)}")
-            print(f"   组属性: {dir(group)}")
+            print(f"   Group type: {type(group)}")
+            print(f"   Group attributes: {dir(group)}")
             
     except Exception as e:
-        print(f"   调试失败: {e}")
+        print(f"   Debug failed: {e}")
 
 
 def load_zarr_fallback(zip_path):
-    """
-    备用的Zarr加载方案
+    """Fallback Zarr loading method"""
+    print(f"Using fallback method: {zip_path}")
     
-    Args:
-        zip_path: zip文件路径
-        
-    Returns:
-        group: 模拟的Zarr组对象
-    """
-    print(f"使用备用方案加载: {zip_path}")
-    
-    # 创建临时目录并提取文件
     temp_dir = tempfile.mkdtemp()
     
     with zipfile.ZipFile(zip_path, 'r') as zip_file:
         zip_file.extractall(temp_dir)
     
-    # 尝试直接从目录加载
     try:
         return zarr.open_group(temp_dir, mode='r')
     except Exception:
-        # 如果还是失败，返回一个模拟对象
         return FallbackZarrGroup(temp_dir)
 
 
 class FallbackZarrGroup:
-    """备用的Zarr组实现"""
+    """Fallback Zarr group implementation"""
     
     def __init__(self, base_path):
-        """
-        初始化备用Zarr组
-        
-        Args:
-            base_path: 数据基础路径
-        """
+        """Initialize fallback Zarr group"""
         self.base_path = Path(base_path)
         self._arrays = {}
         self._scan_arrays()
     
     def _scan_arrays(self):
-        """扫描数组文件"""
-        # 查找.zarr目录或直接的数组文件
+        """Scan array files"""
+        # Find .zarr directories or array files
         for item in self.base_path.rglob('*'):
             if item.is_file() and item.suffix in ['.zarr', '.dat', '.npy']:
-                # 简化的数组名
                 rel_path = item.relative_to(self.base_path)
                 array_name = str(rel_path.with_suffix('').as_posix())
                 
@@ -328,17 +349,16 @@ class FallbackZarrGroup:
                     if item.suffix == '.npy':
                         self._arrays[array_name] = np.load(item)
                     else:
-                        # 尝试加载为zarr数组
                         self._arrays[array_name] = zarr.open_array(str(item), mode='r')
                 except Exception as e:
-                    print(f"无法加载数组 {array_name}: {e}")
+                    print(f"Cannot load array {array_name}: {e}")
     
     def __getattr__(self, name):
-        """获取数组属性"""
+        """Get array attribute"""
         if name in self._arrays:
             return self._arrays[name]
         
-        # 尝试动态加载
+        # Try dynamic loading
         array_path = self.base_path / f"{name}.zarr"
         if array_path.exists():
             try:
@@ -348,7 +368,6 @@ class FallbackZarrGroup:
             except Exception:
                 pass
         
-        # 尝试.npy文件
         npy_path = self.base_path / f"{name}.npy"
         if npy_path.exists():
             try:
@@ -358,56 +377,46 @@ class FallbackZarrGroup:
             except Exception:
                 pass
         
-        raise AttributeError(f"数组不存在: {name}")
+        raise AttributeError(f"Array not found: {name}")
     
     def keys(self):
-        """获取所有数组名"""
+        """Get all array names"""
         return list(self._arrays.keys())
 
 
-# 便捷函数
+# Utility functions
 def decompress_RGBE_compat(color, exposures):
-    """
-    简化版RGBE解压缩
-    
-    Args:
-        color: RGBE颜色数据 [4, H, W] 或 [4, H, W, S]
-        exposures: 曝光参数 [2]
-        
-    Returns:
-        rgb: RGB颜色数据 [3, H, W]
-    """
+    """Simplified RGBE decompression for HDR data"""
     try:
-        # 确保输入是numpy数组
+        # Ensure inputs are numpy arrays
         color = np.array(color, dtype=np.float32)
         exposures = np.array(exposures, dtype=np.float32)
         
-        print(f"🎨 RGBE解压缩: color形状={color.shape}")
+        print(f"[INFO] RGBE decompression: color shape={color.shape}")
         
-        # 处理样本维度（如果存在）
+        # Handle sample dimension
         if color.ndim == 4 and color.shape[-1] > 1:
-            color = color.mean(axis=-1)  # 对样本求平均
+            color = color.mean(axis=-1)
         elif color.ndim == 4 and color.shape[-1] == 1:
             color = color.squeeze(axis=-1)
         
-        # 检查维度
         if color.ndim != 3 or color.shape[0] < 4:
-            raise ValueError(f"期望color形状为[4,H,W]，实际: {color.shape}")
+            raise ValueError(f"Expected color shape [4,H,W], got: {color.shape}")
         
-        # 提取E通道并计算指数
+        # Extract E channel and compute exponents
         e_channel = color[3]
         exponents = np.exp((e_channel / 255.0) * (exposures[1] - exposures[0]) + exposures[0])
         
-        # 应用到RGB通道
+        # Apply to RGB channels
         rgb = color[:3] / 255.0
         rgb = rgb * exponents[np.newaxis, :, :]
         
-        print(f"🎨 解压缩成功: {rgb.shape}")
+        print(f"[SUCCESS] Decompression successful: {rgb.shape}")
         return rgb
         
     except Exception as e:
-        print(f"❌ RGBE解压缩失败: {e}")
-        # 返回安全默认值
+        print(f"[ERROR] RGBE decompression failed: {e}")
+        # Return safe default
         if hasattr(color, 'shape') and len(color.shape) >= 2:
             H, W = color.shape[-2], color.shape[-1]
             return np.zeros((3, H, W), dtype=np.float32)
@@ -416,16 +425,15 @@ def decompress_RGBE_compat(color, exposures):
 
 
 if __name__ == "__main__":
-    # 测试兼容性
-    print(f"Zarr版本: {get_zarr_version()}")
+    # Test compatibility
+    print(f"Zarr version: {get_zarr_version()}")
     
-    # 测试ZipStore创建
+    # Test ZipStore creation
     try:
-        # 创建一个测试zip store（这会失败，但可以看到错误信息）
-        print("测试ZipStore创建...")
+        print("Testing ZipStore creation...")
         store = create_zip_store("test.zip", mode='r')
-        print("✅ ZipStore创建成功")
+        print("[SUCCESS] ZipStore created successfully")
     except Exception as e:
-        print(f"⚠️ ZipStore测试失败（预期）: {e}")
+        print(f"[WARN] ZipStore test failed (expected): {e}")
     
-    print("兼容性模块加载完成")
+    print("Compatibility module loaded successfully")

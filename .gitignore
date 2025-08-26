@@ -25,7 +25,16 @@ network.md
 技术细则.md
 问题.md
 
+detach.py
+utils.py
+
 *.pdf
+
+/logs/
+/output_images/
+/output_motion_fix/
+
+log.txt
 
 # 敏感信息
 .env

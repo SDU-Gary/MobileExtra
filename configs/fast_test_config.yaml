@@ -1,0 +1,80 @@
+# 快速测试配置 - 解决极低学习率导致的收敛问题
+# 作者：AI算法团队
+# 日期：2025-08-25
+# 目的：快速验证网络能否正确学习映射
+
+# 网络配置
+network:
+  input_channels: 7
+  output_channels: 3
+  patch_size: 128
+  base_channels: 16
+  use_attention: true
+  use_boundary_aware: true
+
+# 数据配置
+data:
+  data_root: "./output_motion_fix"
+  batch_size: 2                     # 小批次快速测试
+  num_workers: 0
+  
+  # 快速测试设置
+  max_epochs: 20                    # 少量epoch快速测试
+  learning_rate: 0.001              # 🔧 高学习率快速收敛测试
+  weight_decay: 0.0001
+
+# 优化器配置 - 快速收敛
+optimizer:
+  type: "adam"
+  lr: 0.001                         # 高学习率
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  eps: 0.00000001
+
+# 训练器配置 - 快速测试
+trainer:
+  accumulate_grad_batches: 1        # 不累积，直接更新
+  precision: 32
+  gradient_clip_val: 2.0            # 放宽梯度裁剪
+  
+  # 频繁检查进展
+  val_check_interval: 0.5           # 每半个epoch检查
+  check_val_every_n_epoch: 1        # 每个epoch验证
+  
+  # 快速checkpoint
+  save_every_n_epochs: 5
+  save_top_k: 3
+
+# 损失配置
+loss:
+  lambda_l1: 1.0
+  lambda_perceptual: 0.1
+  lambda_edge: 0.1
+  lambda_boundary: 0.2
+
+# 学习率调度器 - 快速收敛测试
+scheduler:
+  type: "cosine"
+  max_epochs: 20
+  eta_min: 0.00001
+  warmup_epochs: 2
+
+# 可视化配置 - 密集监控
+visualization:
+  log_every_n_steps: 10             # 每10步记录
+  save_images: true
+  save_predictions: true
+  
+# 早停配置 - 快速验证
+early_stopping:
+  monitor: "val_loss"
+  patience: 5
+  mode: "min"
+  
+# 测试说明
+description: |
+  快速测试配置用于验证网络学习能力
+  - 高学习率(1e-3)快速收敛测试
+  - 小批次和短epoch快速反馈
+  - 密集的监控和可视化
+  - 目标：在5-10个epoch内看到明显的预测改善

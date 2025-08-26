@@ -1,0 +1,152 @@
+# 超安全训练配置 - 极度保守的内存设置
+# 目标: 防止系统卡死，确保训练可以开始
+# 注意: 这是测试用的小分辨率配置，如需全分辨率请使用 full_resolution_config.yaml
+
+experiment:
+  name: "ultra_safe_mobile_interpolation"
+  version: "v1.0"
+  description: "极度保守的训练配置，防止内存溢出(270×480测试版)"
+
+# 数据集配置 - 最小化内存占用
+datasets:
+  train_data_root: "./output_motion_fix"
+  preprocessing:
+    # 关键：大幅降低分辨率进行初期训练
+    target_resolution: [270, 480]  # 1/4原始分辨率
+    normalize_method: "none"
+    augmentation: false  # 禁用数据增强
+  train_split: 0.8
+  val_split: 0.2
+
+# 模型配置 - 最小化架构
+model:
+  architecture: "simplified_unet"  # 简化的UNet
+  input_channels: 7
+  output_channels: 3
+  
+  # 大幅简化网络结构
+  encoder_channels: [32, 64, 128]  # 原来是[64, 128, 256, 512, 1024]
+  decoder_channels: [128, 64, 32]
+  
+  # 禁用复杂组件
+  use_ffc: false  # 禁用FFC (最大内存消耗源)
+  use_gated_conv: false  # 禁用门控卷积
+  use_attention: false  # 禁用注意力机制
+  
+  # 网络参数
+  dropout_rate: 0.1
+  activation: "relu"  # 比其他激活函数更节省内存
+
+# 损失函数配置 - 多损失函数组合
+loss:
+  # 损失函数权重配置 (保守设置，避免内存过载)
+  mse_weight: 1.0        # MSE损失 (基础重建损失)
+  l1_weight: 0.3         # L1损失 (降低权重节省计算)
+  ssim_weight: 0.2       # SSIM损失 (轻量化)
+  edge_weight: 0.15      # 边缘损失 (适度)
+  hole_aware_weight: 0.4 # 洞区域专用损失
+  perceptual_weight: 0.05 # 感知损失 (最小权重)
+
+# 训练配置 - 极度保守
+training:
+  # 最小批次设置
+  batch_size: 1  # 不能再小了
+  num_workers: 0  # 避免多进程内存开销
+  
+  # 学习配置
+  max_epochs: 50  # 减少epochs用于快速测试
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  
+  # 内存优化设置
+  dataloader_pin_memory: false  # 避免固定内存
+  # prefetch_factor: 1  # 当num_workers=0时不能设置此参数
+  persistent_workers: false  # 避免持久化worker
+
+# 优化器配置 - 内存友好
+optimizer:
+  type: "adamw"
+  lr: 0.0001
+  weight_decay: 0.0001
+  # 使用更小的缓冲区
+  betas: [0.9, 0.999]
+  eps: 0.00000001
+
+# 训练器配置 - 极度保守
+trainer:
+  # 内存设置
+  accumulate_grad_batches: 8  # 增加梯度累积补偿小batch_size
+  precision: 32  # 使用FP32避免精度问题
+  gradient_clip_val: 1.0
+  
+  # 检查点设置
+  val_check_interval: 0.5  # 更频繁的验证
+  check_val_every_n_epoch: 5
+  
+  # 内存管理
+  detect_anomaly: false  # 禁用异常检测（节省内存）
+  benchmark: false  # 禁用CUDNN基准测试
+  deterministic: false  # 禁用确定性（节省内存）
+
+# 早停配置
+early_stopping:
+  monitor: "val_loss"
+  patience: 10
+  mode: "min"
+  min_delta: 0.001
+
+# 日志配置 - 最小化
+wandb:
+  enabled: false  # 禁用wandb减少开销
+
+tensorboard:
+  enabled: true
+  save_dir: "./logs/ultra_safe"
+  
+# 简化的日志配置
+logging:
+  level: "INFO"
+  save_dir: "./logs/ultra_safe"
+  
+  # 极简监控
+  advanced_monitoring:
+    enabled: true
+    
+    # 图像可视化 - 最小设置
+    image_visualization:
+      enabled: true
+      save_every_n_epochs: 20  # 减少保存频率
+      max_samples_per_epoch: 1
+      save_format: "jpg"  # 更小的文件格式
+      quality: 80  # 降低图像质量节省空间
+    
+    # 禁用其他监控减少开销
+    gradient_monitoring:
+      enabled: false
+    
+    performance_monitoring:
+      enabled: false
+    
+    weight_analysis:
+      enabled: false
+
+# 蒸馏配置 - 暂时禁用
+distillation:
+  enabled: false
+
+# 量化配置 - 暂时禁用
+quantization:
+  enabled: false
+
+# 内存安全设置
+memory_safety:
+  # GPU内存管理
+  gpu_memory_fraction: 0.5  # 只使用50%的GPU内存
+  allow_growth: true  # 允许动态增长
+  
+  # 系统内存管理
+  max_system_memory_gb: 8  # 限制系统内存使用
+  
+  # 紧急清理
+  emergency_cleanup_threshold: 0.85  # 85%使用率时强制清理
+  auto_garbage_collection: true  # 自动垃圾回收

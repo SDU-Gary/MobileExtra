@@ -35,7 +35,7 @@ import yaml
 import time
 import random
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import numpy as np
 
 import torch
@@ -54,9 +54,10 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'npu', 'net
 
 # 导入训练组件
 from training_framework import FrameInterpolationTrainer, create_trainer
-from dataset import GameSceneDataModule, create_data_module
-from datasets.cod_mobile_dataset import create_cod_mobile_dataset
-from datasets.honor_of_kings_dataset import create_honor_of_kings_dataset
+# 使用统一数据集（10通道格式，优化内存使用）
+from unified_dataset import UnifiedNoiseBaseDataset, create_unified_dataloader
+# from datasets.cod_mobile_dataset import create_cod_mobile_dataset  # 待实现
+# from datasets.honor_of_kings_dataset import create_honor_of_kings_dataset  # 待实现
 from mobile_inpainting_network import create_mobile_inpainting_network
 
 # 设置随机种子
@@ -70,7 +71,7 @@ def set_random_seeds(seed: int = 42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     pl.seed_everything(seed)
-    print(f"Random seeds set to {seed}")
+    print(f"SUCCESS: Random seeds set to {seed}")
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -86,10 +87,10 @@ def load_config(config_path: str) -> Dict[str, Any]:
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        print(f"Config loaded from {config_path}")
+        print(f"SUCCESS: Config loaded from {config_path}")
         return config
     except Exception as e:
-        print(f"Error loading config: {e}")
+        print(f"ERROR: Loading config failed: {e}")
         raise
 
 
@@ -145,6 +146,19 @@ def create_multi_game_dataset(data_configs: Dict[str, Any],
                     mode='val'
                 )
             
+            elif game_name == 'noisebase':
+                # NoiseBase数据集（10通道统一格式，优化内存使用）
+                train_ds = UnifiedNoiseBaseDataset(
+                    data_root=game_config['data_root'],
+                    split='train',
+                    augmentation=False  # 暂时禁用数据增强
+                )
+                val_ds = UnifiedNoiseBaseDataset(
+                    data_root=game_config['data_root'],
+                    split='val',
+                    augmentation=False
+                )
+            
             # TODO: 添加其他游戏数据集
             # elif game_name == 'qq_speed':
             #     ...
@@ -161,7 +175,7 @@ def create_multi_game_dataset(data_configs: Dict[str, Any],
             print(f"{game_name} - Train: {len(train_ds)}, Val: {len(val_ds)}")
             
         except Exception as e:
-            print(f"Error loading {game_name} dataset: {e}")
+            print(f"ERROR: Loading {game_name} dataset failed: {e}")
             continue
     
     if not train_datasets:
@@ -226,7 +240,7 @@ def setup_logging(config: Dict[str, Any]) -> List[pl.loggers.Logger]:
             default_hp_metric=False
         )
         loggers.append(tb_logger)
-        print(f"TensorBoard logging enabled: {tb_logger.log_dir}")
+        print(f"SUCCESS: TensorBoard logging enabled: {tb_logger.log_dir}")
     
     # W&B日志
     if config.get('wandb', {}).get('enabled', False):
@@ -237,7 +251,7 @@ def setup_logging(config: Dict[str, Any]) -> List[pl.loggers.Logger]:
             save_dir=config['logging']['log_dir']
         )
         loggers.append(wandb_logger)
-        print(f"W&B logging enabled: {config['wandb']['project']}")
+        print(f"SUCCESS: W&B logging enabled: {config['wandb']['project']}")
     
     return loggers
 
@@ -286,45 +300,32 @@ def setup_callbacks(config: Dict[str, Any]) -> List[pl.Callback]:
 def create_trainer_instance(config: Dict[str, Any],
                            loggers: List[pl.loggers.Logger],
                            callbacks: List[pl.Callback]) -> pl.Trainer:
-    """
-    创建PyTorch Lightning训练器
-    
-    Args:
-        config: 训练配置
-        loggers: 日志记录器
-        callbacks: 回调函数
-    
-    Returns:
-        trainer: Lightning训练器
-    """
     trainer_config = config['trainer']
     
-    # 分布式训练策略
-    strategy = None
+    trainer_kwargs = {
+        'max_epochs': trainer_config['max_epochs'],
+        'accelerator': trainer_config.get('accelerator', 'gpu'),
+        'devices': trainer_config.get('devices', 1),
+        'precision': trainer_config.get('precision', 32),
+        'gradient_clip_val': trainer_config.get('gradient_clip_val', 1.0),
+        'accumulate_grad_batches': trainer_config.get('accumulate_grad_batches', 1),
+        'check_val_every_n_epoch': trainer_config.get('check_val_every_n_epoch', 1),
+        'log_every_n_steps': trainer_config.get('log_every_n_steps', 50),
+        'enable_checkpointing': True,
+        'enable_progress_bar': True,
+        'enable_model_summary': True,
+        'logger': loggers,
+        'callbacks': callbacks,
+        'deterministic': True
+    }
+    
     if trainer_config.get('distributed', False):
-        strategy = DDPStrategy(
+        trainer_kwargs['strategy'] = DDPStrategy(
             find_unused_parameters=False,
             gradient_as_bucket_view=True
         )
     
-    # 创建训练器
-    trainer = pl.Trainer(
-        max_epochs=trainer_config['max_epochs'],
-        accelerator=trainer_config.get('accelerator', 'gpu'),
-        devices=trainer_config.get('devices', 1),
-        strategy=strategy,
-        precision=trainer_config.get('precision', 32),
-        gradient_clip_val=trainer_config.get('gradient_clip_val', 1.0),
-        accumulate_grad_batches=trainer_config.get('accumulate_grad_batches', 1),
-        check_val_every_n_epoch=trainer_config.get('check_val_every_n_epoch', 1),
-        log_every_n_steps=trainer_config.get('log_every_n_steps', 50),
-        enable_checkpointing=True,
-        enable_progress_bar=True,
-        enable_model_summary=True,
-        logger=loggers,
-        callbacks=callbacks,
-        deterministic=True
-    )
+    trainer = pl.Trainer(**trainer_kwargs)
     
     return trainer
 
@@ -355,7 +356,7 @@ def main():
     os.makedirs(config['logging']['checkpoint_dir'], exist_ok=True)
     
     print("="*60)
-    print("🚀 Mobile Frame Interpolation Training Started")
+    print("Mobile Frame Interpolation Training Started")
     print("="*60)
     print(f"Experiment: {config['experiment']['name']}")
     print(f"Version: {config['experiment']['version']}")
@@ -366,7 +367,7 @@ def main():
     
     try:
         # 创建数据集
-        print("\n📊 Setting up datasets...")
+        print("\nSETUP: Preparing datasets...")
         dataloaders = create_multi_game_dataset(
             data_configs=config['datasets'],
             batch_size=config['training']['batch_size'],
@@ -374,25 +375,26 @@ def main():
         )
         
         # 创建模型
-        print("\n🧠 Creating model...")
+        print("\nCREATING: Model setup...")
         model_trainer = create_trainer(
             model_config=config['model'],
             training_config=config['training'],
-            teacher_model_path=config['training'].get('teacher_model_path')
+            teacher_model_path=config['training'].get('teacher_model_path'),
+            full_config=config
         )
         
         # 设置日志和回调
-        print("\n📝 Setting up logging and callbacks...")
+        print("\nSETUP: Logging and callbacks...")
         loggers = setup_logging(config)
         callbacks = setup_callbacks(config)
         
         # 创建训练器
-        print("\n⚡ Creating PyTorch Lightning trainer...")
+        print("\nCREATING: PyTorch Lightning trainer...")
         trainer = create_trainer_instance(config, loggers, callbacks)
         
         # 开始训练
         if not args.test_only:
-            print("\n🏋️ Starting training...")
+            print("\nSTARTING: Training process...")
             start_time = time.time()
             
             trainer.fit(
@@ -403,11 +405,11 @@ def main():
             )
             
             training_time = time.time() - start_time
-            print(f"\n✅ Training completed in {training_time/3600:.2f} hours")
+            print(f"\nSUCCESS: Training completed in {training_time/3600:.2f} hours")
         
         # 运行测试
         if 'test' in dataloaders or args.test_only:
-            print("\n🧪 Running final testing...")
+            print("\nRUNNING: Final testing...")
             if args.test_only and args.resume:
                 # 从检查点加载模型进行测试
                 model_trainer = model_trainer.load_from_checkpoint(args.resume)
@@ -416,16 +418,16 @@ def main():
                 model=model_trainer,
                 dataloaders=dataloaders.get('test', dataloaders['val'])
             )
-            print(f"Test Results: {test_results}")
+            print(f"RESULTS: Test completed: {test_results}")
         
-        print("\n🎉 All tasks completed successfully!")
+        print("\nSUCCESS: All tasks completed successfully!")
         
     except KeyboardInterrupt:
-        print("\n⚠️ Training interrupted by user")
+        print("\nWARNING: Training interrupted by user")
         sys.exit(1)
         
     except Exception as e:
-        print(f"\n❌ Training failed with error: {e}")
+        print(f"\nERROR: Training failed with error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

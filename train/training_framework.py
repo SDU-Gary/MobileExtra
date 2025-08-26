@@ -1,36 +1,13 @@
 """
-@file training_framework.py
-@brief PyTorch Lightning训练框架
+PyTorch Lightning training framework for mobile inpainting network.
 
-核心功能：
-- 完整的端到端训练管道
-- 多损失函数组合优化
-- 知识蒸馏训练支持
-- 自动化超参数调优
+Features:
+- Teacher-Student knowledge distillation
+- Multi-loss optimization (L1 + Perceptual + Edge + Temporal)
+- Mixed precision training with gradient clipping
+- TensorBoard visualization
 
-训练策略：
-- Teacher-Student架构: 桌面端大模型 -> 移动端轻量模型(3M参数)
-- 多阶段训练: 预训练 -> 知识蒸馏 -> 量化感知训练
-- 损失函数组合: L1Loss + PerceptualLoss + TemporalConsistencyLoss
-- 数据增强: 随机裁剪/旋转/色彩变换
-- 网络架构: U-Net + Gated Convolution + FFC，6通道输入
-
-技术特点：
-- PyTorch Lightning框架
-- 分布式训练支持
-- 混合精度训练
-- 自动梯度裁剪
-- TensorBoard可视化
-
-性能目标：
-- 训练收敛: <100 epochs
-- 验证指标: SSIM>0.95, PSNR>35dB
-- 蒸馏保持率: >95%
-- 量化精度损失: <5%
-
-@author AI算法团队
-@date 2025-07-28
-@version 1.0
+Target: <3M parameters, SSIM>0.95, <100 epochs convergence
 """
 
 import torch
@@ -43,48 +20,42 @@ from torchvision.models import vgg19
 import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
-import wandb
 
-# 导入网络模型
+# Import network models
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'npu', 'networks'))
 from mobile_inpainting_network import MobileInpaintingNetwork
 
+# Import training monitor
+from training_monitor import TrainingMonitor, create_training_monitor
+
 
 class PerceptualLoss(nn.Module):
-    """
-    感知损失 - VGG特征损失
-    
-    使用预训练VGG19网络的中间层特征来计算感知损失，
-    确保修复结果在视觉上更自然
-    """
+    """VGG19-based perceptual loss for visual quality enhancement."""
     
     def __init__(self, feature_layers=[2, 7, 12, 21, 30]):
         super(PerceptualLoss, self).__init__()
         
-        # 加载预训练VGG19
+        # Load pretrained VGG19 and extract specified layers
         vgg = vgg19(pretrained=True).features
         self.feature_layers = feature_layers
         
-        # 提取指定层
         self.features = nn.ModuleList()
-        prev_layer = 0
         for layer_idx in feature_layers:
-            self.features.append(vgg[prev_layer:layer_idx+1])
-            prev_layer = layer_idx + 1
+            self.features.append(vgg[:layer_idx+1])
         
-        # 冻结VGG参数
+        # Freeze VGG parameters
         for param in self.parameters():
             param.requires_grad = False
     
     def forward(self, pred, target):
-        """计算感知损失"""
-        # 确保输入范围在[0,1]
-        pred = (pred + 1) / 2  # [-1,1] -> [0,1]  
+        """Compute perceptual loss using VGG features."""
+        # Normalize to [0,1] range
+        pred = (pred + 1) / 2
         target = (target + 1) / 2
         
-        # 如果是单通道，复制为3通道
+        # Convert grayscale to RGB if needed
         if pred.shape[1] == 1:
             pred = pred.repeat(1, 3, 1, 1)
         if target.shape[1] == 1:
@@ -100,16 +71,12 @@ class PerceptualLoss(nn.Module):
 
 
 class EdgeLoss(nn.Module):
-    """
-    边缘损失 - 基于Sobel算子的边缘检测损失
-    
-    强制网络优先恢复正确的物体轮廓和边缘信息
-    """
+    """Sobel-based edge detection loss for contour preservation."""
     
     def __init__(self):
         super(EdgeLoss, self).__init__()
         
-        # Sobel算子
+        # Sobel operators
         sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32)
         sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32)
         
@@ -117,12 +84,12 @@ class EdgeLoss(nn.Module):
         self.register_buffer('sobel_y', sobel_y.view(1, 1, 3, 3))
     
     def forward(self, pred, target):
-        """计算边缘损失"""
-        # 转换为灰度图
+        """Compute edge loss using Sobel operators."""
+        # Convert to grayscale
         pred_gray = torch.mean(pred, dim=1, keepdim=True)
         target_gray = torch.mean(target, dim=1, keepdim=True)
         
-        # 计算边缘
+        # Compute edges
         pred_edge_x = F.conv2d(pred_gray, self.sobel_x, padding=1)
         pred_edge_y = F.conv2d(pred_gray, self.sobel_y, padding=1)
         pred_edge = torch.sqrt(pred_edge_x**2 + pred_edge_y**2 + 1e-8)
@@ -135,25 +102,14 @@ class EdgeLoss(nn.Module):
 
 
 class TemporalConsistencyLoss(nn.Module):
-    """
-    时序一致性损失 - 确保连续帧之间的一致性
-    
-    通过比较连续帧之间的差异来约束网络输出的时序稳定性
-    """
+    """Temporal consistency loss for frame stability."""
     
     def __init__(self):
         super(TemporalConsistencyLoss, self).__init__()
     
     def forward(self, pred_current, pred_previous, target_current, target_previous):
-        """
-        计算时序一致性损失
-        Args:
-            pred_current: 当前帧预测 [B, 3, H, W]
-            pred_previous: 前一帧预测 [B, 3, H, W]  
-            target_current: 当前帧真值 [B, 3, H, W]
-            target_previous: 前一帧真值 [B, 3, H, W]
-        """
-        # 计算帧间差异
+        """Compute temporal consistency loss between consecutive frames."""
+        # Compute frame differences
         pred_diff = pred_current - pred_previous
         target_diff = target_current - target_previous
         
@@ -161,12 +117,7 @@ class TemporalConsistencyLoss(nn.Module):
 
 
 class CombinedLoss(nn.Module):
-    """
-    组合损失函数
-    
-    结合多种损失函数：L1 + Perceptual + Edge + Temporal
-    根据network.md的建议实现
-    """
+    """Combined loss function: L1 + Perceptual + Edge + Temporal."""
     
     def __init__(self, 
                  lambda_l1=1.0,
@@ -196,24 +147,24 @@ class CombinedLoss(nn.Module):
         """
         losses = {}
         
-        # L1重建损失
+        # Reconstruction loss
         l1_loss = self.l1_loss(pred, target)
         losses['l1'] = l1_loss
         
-        # 感知损失
+        # Perceptual loss
         perceptual_loss = self.perceptual_loss(pred, target)
         losses['perceptual'] = perceptual_loss
         
-        # 边缘损失
+        # Edge loss
         edge_loss = self.edge_loss(pred, target)
         losses['edge'] = edge_loss
         
-        # 总损失
+        # Total loss
         total_loss = (self.lambda_l1 * l1_loss + 
                      self.lambda_perceptual * perceptual_loss + 
                      self.lambda_edge * edge_loss)
         
-        # 时序一致性损失（如果提供了前一帧）
+        # Temporal consistency loss (if previous frame provided)
         if pred_prev is not None and target_prev is not None:
             temporal_loss = self.temporal_loss(pred, pred_prev, target, target_prev)
             losses['temporal'] = temporal_loss
@@ -224,11 +175,7 @@ class CombinedLoss(nn.Module):
 
 
 class DistillationLoss(nn.Module):
-    """
-    知识蒸馏损失
-    
-    Teacher-Student框架的蒸馏损失，包含特征层面和输出层面的蒸馏
-    """
+    """Knowledge distillation loss for Teacher-Student training."""
     
     def __init__(self, temperature=4.0, alpha=0.7):
         super(DistillationLoss, self).__init__()
@@ -238,96 +185,95 @@ class DistillationLoss(nn.Module):
         self.mse_loss = nn.MSELoss()
     
     def forward(self, student_output, teacher_output, target):
-        """
-        计算蒸馏损失
-        Args:
-            student_output: 学生网络输出
-            teacher_output: 教师网络输出  
-            target: 真值目标
-        """
-        # 输出层面蒸馏（软标签）
-        student_soft = F.log_softmax(student_output / self.temperature, dim=1)
-        teacher_soft = F.softmax(teacher_output / self.temperature, dim=1)
+        """Compute distillation loss for regression task."""
+        # Feature distillation loss (MSE for regression)
+        feature_distillation_loss = self.mse_loss(student_output, teacher_output)
         
-        distillation_loss = self.kl_div(student_soft, teacher_soft) * (self.temperature ** 2)
-        
-        # 与真值的硬标签损失
+        # Hard target loss
         hard_loss = F.l1_loss(student_output, target)
         
-        # 组合损失
-        total_loss = self.alpha * distillation_loss + (1 - self.alpha) * hard_loss
+        # Combined loss: balance feature matching and target matching
+        total_loss = self.alpha * feature_distillation_loss + (1 - self.alpha) * hard_loss
         
         return total_loss, {
-            'distillation': distillation_loss,
+            'feature_distillation': feature_distillation_loss,
             'hard': hard_loss,
             'total': total_loss
         }
 
 
 class FrameInterpolationTrainer(pl.LightningModule):
-    """
-    帧插值训练器 - PyTorch Lightning模块
-    
-    功能：
-    - 完整的训练流程管理
-    - 组合损失函数训练
-    - 知识蒸馏支持
-    - 自动验证和日志记录
-    """
+    """PyTorch Lightning trainer for frame interpolation with knowledge distillation."""
     
     def __init__(self, 
                  model_config: Dict[str, Any],
                  training_config: Dict[str, Any],
-                 teacher_model_path: Optional[str] = None):
+                 teacher_model_path: Optional[str] = None,
+                 full_config: Optional[Dict[str, Any]] = None):
         super(FrameInterpolationTrainer, self).__init__()
         
         self.save_hyperparameters()
         
-        # 创建学生网络
+        # Create student network
+        inpainting_config = model_config.get('inpainting_network', {})
         self.student_model = MobileInpaintingNetwork(
-            input_channels=model_config.get('input_channels', 6),
-            output_channels=model_config.get('output_channels', 3)
+            input_channels=inpainting_config.get('input_channels', 7),
+            output_channels=inpainting_config.get('output_channels', 3)
         )
         
-        # 加载教师网络（如果使用知识蒸馏）
+        # Load teacher network for knowledge distillation
         self.teacher_model = None
         if teacher_model_path and os.path.exists(teacher_model_path):
             self.teacher_model = MobileInpaintingNetwork(
-                input_channels=model_config.get('input_channels', 6),
-                output_channels=model_config.get('output_channels', 3)
+                input_channels=inpainting_config.get('input_channels', 7),
+                output_channels=inpainting_config.get('output_channels', 3)
             )
             checkpoint = torch.load(teacher_model_path, map_location='cpu')
             self.teacher_model.load_state_dict(checkpoint['state_dict'])
             self.teacher_model.eval()
             
-            # 冻结教师网络
+            # Freeze teacher network parameters
             for param in self.teacher_model.parameters():
                 param.requires_grad = False
         
-        # 损失函数
+        # 损失函数 - 确保类型正确
         loss_weights = training_config.get('loss_weights', {})
         self.criterion = CombinedLoss(
-            lambda_l1=loss_weights.get('reconstruction', 1.0),
-            lambda_perceptual=loss_weights.get('perceptual', 0.1),
-            lambda_edge=loss_weights.get('temporal_consistency', 0.05),
-            lambda_temporal=loss_weights.get('temporal_consistency', 0.02)
+            lambda_l1=float(loss_weights.get('reconstruction', 1.0)),
+            lambda_perceptual=float(loss_weights.get('perceptual', 0.1)),
+            lambda_edge=float(loss_weights.get('temporal_consistency', 0.05)),
+            lambda_temporal=float(loss_weights.get('temporal_consistency', 0.02))
         )
         
         # 蒸馏损失
         if self.teacher_model is not None:
             distillation_config = training_config.get('distillation', {})
             self.distillation_loss = DistillationLoss(
-                temperature=distillation_config.get('temperature', 4.0),
-                alpha=distillation_config.get('alpha', 0.7)
+                temperature=float(distillation_config.get('temperature', 4.0)),
+                alpha=float(distillation_config.get('alpha', 0.7))
             )
         
-        # 训练配置
-        self.learning_rate = training_config.get('learning_rate', 1e-4)
-        self.weight_decay = training_config.get('weight_decay', 1e-5)
+        # 训练配置 - 确保类型正确
+        self.learning_rate = float(training_config.get('learning_rate', 1e-4))
+        self.weight_decay = float(training_config.get('weight_decay', 1e-5))
         
         # 指标统计
         self.training_step_outputs = []
         self.validation_step_outputs = []
+        
+        # 初始化训练监控器
+        self.monitor = None
+        if full_config:
+            self.monitor = create_training_monitor(full_config, self.student_model)
+            if self.monitor:
+                print("INFO: Advanced training monitoring system enabled")
+    
+    def on_fit_start(self):
+        """训练开始时连接Lightning日志器"""
+        if self.monitor and self.logger:
+            # 连接Lightning的TensorBoard日志器
+            self.monitor.set_lightning_logger(self.logger)
+            print("INFO: Training monitor connected to Lightning logger")
     
     def forward(self, x):
         """前向传播"""
@@ -335,8 +281,20 @@ class FrameInterpolationTrainer(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """训练步骤"""
-        # 解包数据
-        input_data, target, input_prev, target_prev = batch
+        # 开始step监控
+        if self.monitor:
+            self.monitor.start_step()
+        
+        # 解包数据 - 修正为匹配corrected_dataset.py的输出格式
+        if len(batch) == 2:
+            # 新格式: (input_tensor, target_tensor) from corrected_dataset.py
+            input_data, target = batch
+            input_prev, target_prev = None, None
+        elif len(batch) == 4:
+            # 旧格式: (input_data, target, input_prev, target_prev)
+            input_data, target, input_prev, target_prev = batch
+        else:
+            raise ValueError(f"Unexpected batch format. Expected 2 or 4 items, got {len(batch)}")
         
         # 学生网络预测
         pred = self.student_model(input_data)
@@ -358,7 +316,8 @@ class FrameInterpolationTrainer(pl.LightningModule):
         # 记录损失
         self.log('train/total_loss', total_loss, prog_bar=True)
         for key, value in loss_dict.items():
-            self.log(f'train/{key}_loss', value)
+            if key != 'total':  # 避免重复记录total_loss
+                self.log(f'train/{key}_loss', value)
         
         # 记录指标
         with torch.no_grad():
@@ -367,12 +326,37 @@ class FrameInterpolationTrainer(pl.LightningModule):
             self.log('train/ssim', ssim_score)
             self.log('train/psnr', psnr_score)
         
+        # 高级监控记录
+        if self.monitor:
+            # 获取当前学习率
+            current_lr = self.trainer.optimizers[0].param_groups[0]['lr'] if self.trainer and self.trainer.optimizers else self.learning_rate
+            
+            # 构建损失字典用于监控
+            monitor_loss_dict = {'total': total_loss.item()}
+            for key, value in loss_dict.items():
+                monitor_loss_dict[key] = value.item() if torch.is_tensor(value) else value
+            
+            # 结束step监控（传入损失和学习率）
+            self.monitor.end_step(monitor_loss_dict, current_lr)
+            
+            # 梯度监控
+            self.monitor.monitor_gradients()
+        
         self.training_step_outputs.append(total_loss)
         return total_loss
     
     def validation_step(self, batch, batch_idx):
         """验证步骤"""
-        input_data, target, input_prev, target_prev = batch
+        # 解包数据 - 修正为匹配corrected_dataset.py的输出格式
+        if len(batch) == 2:
+            # 新格式: (input_tensor, target_tensor) from corrected_dataset.py
+            input_data, target = batch
+            input_prev, target_prev = None, None
+        elif len(batch) == 4:
+            # 旧格式: (input_data, target, input_prev, target_prev)
+            input_data, target, input_prev, target_prev = batch
+        else:
+            raise ValueError(f"Unexpected batch format. Expected 2 or 4 items, got {len(batch)}")
         
         # 预测
         pred = self.student_model(input_data)
@@ -391,7 +375,12 @@ class FrameInterpolationTrainer(pl.LightningModule):
         self.log('val/psnr', psnr_score, prog_bar=True)
         
         for key, value in loss_dict.items():
-            self.log(f'val/{key}_loss', value)
+            if key != 'total':  # 避免重复记录total_loss
+                self.log(f'val/{key}_loss', value)
+        
+        # 图像可视化保存（只在第一个batch保存，避免过多I/O）
+        if self.monitor and batch_idx == 0:
+            self.monitor.save_training_images(input_data, pred, target, prefix="val")
         
         self.validation_step_outputs.append({
             'val_loss': val_loss,
@@ -400,6 +389,11 @@ class FrameInterpolationTrainer(pl.LightningModule):
         })
         
         return val_loss
+    
+    def on_train_epoch_start(self):
+        """训练epoch开始"""
+        if self.monitor:
+            self.monitor.start_epoch(self.current_epoch)
     
     def on_train_epoch_end(self):
         """训练epoch结束"""
@@ -417,6 +411,17 @@ class FrameInterpolationTrainer(pl.LightningModule):
             self.log('epoch/val_loss', avg_loss)
             self.log('epoch/val_ssim', avg_ssim)
             self.log('epoch/val_psnr', avg_psnr)
+            
+            # 高级监控epoch结束
+            if self.monitor:
+                # 获取训练损失
+                train_loss = torch.stack(self.training_step_outputs).mean().item() if self.training_step_outputs else 0.0
+                self.monitor.end_epoch(
+                    train_loss,
+                    avg_loss.item(),
+                    avg_ssim.item(),
+                    avg_psnr.item()
+                )
             
             self.validation_step_outputs.clear()
     
@@ -442,32 +447,82 @@ class FrameInterpolationTrainer(pl.LightningModule):
         }
     
     def _calculate_ssim(self, pred, target):
-        """计算SSIM指标"""
-        # 简化的SSIM计算
-        mu1 = pred.mean()
-        mu2 = target.mean()
-        sigma1_sq = ((pred - mu1) ** 2).mean()
-        sigma2_sq = ((target - mu2) ** 2).mean()
-        sigma12 = ((pred - mu1) * (target - mu2)).mean()
+        """
+        计算SSIM指标 - 修复为正确的SSIM计算
+        Args:
+            pred: 预测图像 [B, C, H, W], 范围[-1, 1]
+            target: 目标图像 [B, C, H, W], 范围[-1, 1]
+        """
+        # 转换到[0, 1]范围进行SSIM计算
+        pred_01 = (pred + 1.0) / 2.0
+        target_01 = (target + 1.0) / 2.0
         
-        c1 = 0.01 ** 2
-        c2 = 0.03 ** 2
+        # 确保数值稳定性
+        pred_01 = torch.clamp(pred_01, 0.0, 1.0)
+        target_01 = torch.clamp(target_01, 0.0, 1.0)
         
-        ssim = ((2 * mu1 * mu2 + c1) * (2 * sigma12 + c2)) / \
-               ((mu1 ** 2 + mu2 ** 2 + c1) * (sigma1_sq + sigma2_sq + c2))
+        # SSIM常数
+        c1 = (0.01 * 1.0) ** 2  # 数据范围为1.0
+        c2 = (0.03 * 1.0) ** 2
+        
+        # 计算均值、方差和协方差
+        mu1 = F.avg_pool2d(pred_01, 3, 1, 1)
+        mu2 = F.avg_pool2d(target_01, 3, 1, 1)
+        
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu1_mu2 = mu1 * mu2
+        
+        sigma1_sq = F.avg_pool2d(pred_01 ** 2, 3, 1, 1) - mu1_sq
+        sigma2_sq = F.avg_pool2d(target_01 ** 2, 3, 1, 1) - mu2_sq
+        sigma12 = F.avg_pool2d(pred_01 * target_01, 3, 1, 1) - mu1_mu2
+        
+        # SSIM计算
+        numerator = (2 * mu1_mu2 + c1) * (2 * sigma12 + c2)
+        denominator = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
+        
+        ssim_map = numerator / (denominator + 1e-8)  # 避免除零
+        ssim = ssim_map.mean()
+        
+        # 确保SSIM在合理范围内
+        ssim = torch.clamp(ssim, -1.0, 1.0)
         
         return ssim
     
     def _calculate_psnr(self, pred, target):
-        """计算PSNR指标"""
-        mse = F.mse_loss(pred, target)
-        psnr = 20 * torch.log10(2.0 / torch.sqrt(mse))  # 输入范围[-1,1]
+        """
+        计算PSNR指标 - 修复为正确的PSNR计算
+        Args:
+            pred: 预测图像 [B, C, H, W], 范围[-1, 1]
+            target: 目标图像 [B, C, H, W], 范围[-1, 1]
+        """
+        # 转换到[0, 1]范围进行PSNR计算
+        pred_01 = (pred + 1.0) / 2.0
+        target_01 = (target + 1.0) / 2.0
+        
+        # 确保数值稳定性
+        pred_01 = torch.clamp(pred_01, 0.0, 1.0)
+        target_01 = torch.clamp(target_01, 0.0, 1.0)
+        
+        # 计算MSE
+        mse = F.mse_loss(pred_01, target_01)
+        
+        # 避免log(0)，设置最小MSE值
+        mse = torch.clamp(mse, min=1e-10)
+        
+        # PSNR计算，最大像素值为1.0
+        psnr = 20 * torch.log10(1.0 / torch.sqrt(mse))
+        
+        # 限制PSNR范围，避免异常值
+        psnr = torch.clamp(psnr, 0.0, 100.0)
+        
         return psnr
 
 
 def create_trainer(model_config: Dict[str, Any], 
                   training_config: Dict[str, Any],
-                  teacher_model_path: Optional[str] = None) -> FrameInterpolationTrainer:
+                  teacher_model_path: Optional[str] = None,
+                  full_config: Optional[Dict[str, Any]] = None) -> FrameInterpolationTrainer:
     """
     创建训练器实例
     
@@ -475,6 +530,7 @@ def create_trainer(model_config: Dict[str, Any],
         model_config: 模型配置
         training_config: 训练配置
         teacher_model_path: 教师模型路径（用于知识蒸馏）
+        full_config: 完整配置（包含监控设置）
     
     Returns:
         trainer: 训练器实例
@@ -482,7 +538,8 @@ def create_trainer(model_config: Dict[str, Any],
     trainer = FrameInterpolationTrainer(
         model_config=model_config,
         training_config=training_config,
-        teacher_model_path=teacher_model_path
+        teacher_model_path=teacher_model_path,
+        full_config=full_config
     )
     
     print(f"=== Frame Interpolation Trainer ===")
@@ -497,7 +554,7 @@ def create_trainer(model_config: Dict[str, Any],
 if __name__ == "__main__":
     # 测试训练器
     model_config = {
-        'input_channels': 6,
+        'input_channels': 7,
         'output_channels': 3
     }
     

@@ -21,19 +21,40 @@
 # @date 2025-07-28
 # @version 1.0
 
+# 实验配置
+experiment:
+  name: "mobile_interpolation_7ch"
+  version: "1.0"
+  description: "7通道移动端实时帧插值训练"
+  tags: ["mobile", "interpolation", "7channel", "noisebase"]
+
 # 训练数据配置
-dataset:
-  data_root: "./data/game_scenes"
-  train_split: "./data/splits/train.txt"
-  val_split: "./data/splits/val.txt"
-  test_split: "./data/splits/test.txt"
-  patch_size: 64
-  sequence_length: 5
+datasets:
+  # NoiseBase数据集配置
+  noisebase:
+    data_root: "./output_motion_fix"  # 预处理后的7通道数据
+    patch_size: 64
+    sequence_length: 5
+  
+  # 游戏场景数据集配置（待实现）
+  # cod_mobile:
+  #   data_root: "./data/cod_mobile"
+  #   train_split: "./data/splits/cod_train.txt"
+  #   val_split: "./data/splits/cod_val.txt"
+  #   patch_size: 64
+  # honor_of_kings:
+  #   data_root: "./data/honor_of_kings"  
+  #   train_split: "./data/splits/hok_train.txt"
+  #   val_split: "./data/splits/hok_val.txt"
+  #   patch_size: 64
   
 # 网络架构配置  
 model:
+  # 启用统一输入归一化（修复TensorBoard显示问题）
+  enable_input_normalization: true
+  
   inpainting_network:
-    input_channels: 6  # RGB(3) + Mask(1) + ResidualMV(2)
+    input_channels: 7  # WarPedRGB(3) + SemanticHoles(1) + Occlusion(1) + ResidualMV(2)
     output_channels: 3  # RGB
     parameter_budget: 3000000  # 3.0M参数
     architecture: "UNet_GatedConv_FFC"  # U-Net + Gated Convolution + FFC
@@ -42,20 +63,60 @@ model:
     input_channels: 3
     lut_size: 8  # 8x8x8 LUT
     parameter_budget: 700000  # 0.7M参数
+  
+  # 输入归一化配置（修复HDR和掩码显示）
+  input_normalizer:
+    rgb_method: "hdr_to_ldr"
+    tone_mapping: "adaptive_reinhard"  # 自适应Reinhard tone mapping
+    normalize_masks: false  # 掩码保持[0,1]范围
+    normalize_mv: false  # 运动矢量保持原始范围
+    gamma: 2.2
+    exposure_adjustment: 1.8
 
 # 训练超参数
 training:
-  batch_size: 32
-  learning_rate: 1e-4
-  weight_decay: 1e-5
-  max_epochs: 100
+  batch_size: 1  # FP32+完整图像，最小批次避免内存溢出
+  learning_rate: 0.0001  # 1e-4
+  weight_decay: 0.00001  # 1e-5
+  max_epochs: 200  # 增加训练轮数补偿小数据集
+  num_workers: 0  # 禁用多进程加载减少内存占用
   
   # 损失函数权重
   loss_weights:
     reconstruction: 1.0
     perceptual: 0.1  
     temporal_consistency: 0.05
-    distillation: 0.2
+    distillation: 0.0  # 暂时禁用知识蒸馏，因为没有教师模型
+
+# 早停配置
+early_stopping:
+  patience: 10
+  min_delta: 0.001
+  monitor: "val_loss"
+  mode: "min"
+
+# PyTorch Lightning训练器配置
+trainer:
+  max_epochs: 100
+  accelerator: "gpu"  # gpu, cpu, auto
+  devices: 1  # GPU数量
+  precision: 32  # 暂时禁用混合精度避免FFT尺寸限制 (16, 32)
+  distributed: false  # 分布式训练
+  gradient_clip_val: 1.0  # 梯度裁剪
+  accumulate_grad_batches: 4  # 1080p图像降低梯度累积减少内存
+  check_val_every_n_epoch: 1  # 验证频率
+  log_every_n_steps: 50  # 日志频率
+
+# Weights & Biases配置
+wandb:
+  enabled: false  # 设为true启用wandb
+  project: "mobile_interpolation"
+  entity: "your_team"
+
+# TensorBoard配置
+tensorboard:
+  enabled: true
+  log_every_n_steps: 50
 
 # 知识蒸馏配置
 distillation:
@@ -71,4 +132,69 @@ quantization:
   calibration_dataset_size: 1000
   quantization_aware_training: true
 
-# TODO: 完善训练配置的详细参数设置
+# 日志和监控配置
+logging:
+  # 基础日志设置
+  log_dir: "./logs"
+  checkpoint_dir: "./checkpoints"
+  experiment_name: "mobile_interpolation_7ch"
+  
+  # TensorBoard配置
+  tensorboard:
+    enabled: true
+    log_every_n_steps: 50
+    log_images_every_n_epochs: 5
+    max_image_samples: 8
+    
+  # Weights & Biases配置
+  wandb:
+    enabled: false  # 可选启用
+    project: "mobile_interpolation"
+    entity: "your_team"
+    
+  # 文件日志配置
+  file_logging:
+    enabled: true
+    log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+    max_file_size: "50MB"
+    backup_count: 5
+    log_files:
+      training: "training.log"
+      monitoring: "monitoring.log" 
+      performance: "performance.log"
+      errors: "errors.log"
+      
+  # 高级监控配置
+  advanced_monitoring:
+    enabled: true
+    # 梯度监控
+    gradient_monitoring:
+      enabled: true
+      log_every_n_steps: 100
+      track_gradient_norm: true
+      track_gradient_distribution: true
+      
+    # 权重监控  
+    weight_monitoring:
+      enabled: true
+      log_every_n_epochs: 1
+      track_weight_distribution: true
+      track_weight_updates: true
+      
+    # 内存和性能监控
+    performance_monitoring:
+      enabled: true
+      log_every_n_steps: 200
+      track_gpu_memory: true
+      track_cpu_memory: true
+      track_training_speed: true
+      
+    # 图像可视化
+    image_visualization:
+      enabled: true
+      save_every_n_epochs: 10  # 1080p图像减少保存频率
+      max_samples_per_epoch: 1   # 保持最小样本数
+      save_input_output_comparison: true
+      save_loss_heatmaps: true
+      save_individual_images: true        # 新增：保存单张完整图像
+      save_comparison_grid: true          # 新增：是否保存对比网格图

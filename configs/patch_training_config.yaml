@@ -1,0 +1,136 @@
+# Patch-Based训练系统配置文件
+# 作者：AI算法团队
+# 日期：2025-08-24
+
+# ==================== 数据配置 ====================
+data:
+  data_root: "./output_motion_fix"          # 数据根目录
+  batch_size: 4                             # 批次大小
+  num_workers: 4                            # 数据加载线程数
+  pin_memory: true                          # 是否固定内存
+
+# ==================== 模型配置 ====================
+model:
+  inpainting_network:
+    input_channels: 7                       # 输入通道数 (WarPedRGB + holes + occlusion + ResidualMV)
+    output_channels: 3                      # 输出通道数 (RGB)
+
+# ==================== 训练配置 ====================
+training:
+  max_epochs: 100                           # 最大训练轮数
+  optimizer:
+    learning_rate: 0.00005                   # 🔧 修复：提升学习率解决收敛过慢问题
+    weight_decay: 0.00001                   # 权重衰减
+  scheduler:
+    T_max: 100                              # 余弦退火周期
+    eta_min: 0.000001                       # 最小学习率
+  log_dir: "./logs/patch_training"          # 日志目录
+
+# ==================== Patch配置 ====================
+patch:
+  enable_patch_mode: true                   # 启用patch模式
+  patch_size: 128                           # patch尺寸
+  patch_mode_probability: 0.7               # patch模式使用概率
+  
+  # Patch生成配置
+  min_patches_per_image: 1                  # 每图最少patch数
+  max_patches_per_image: 8                  # 每图最多patch数
+  patch_overlap_threshold: 0.3              # patch重叠阈值
+  
+  # 缓存配置
+  enable_patch_cache: false                 # 启用patch缓存 (DISABLED: 清理污染的增强缓存)
+  cache_size: 1000                          # 最大缓存patch数量
+  cache_hit_threshold: 0.8                  # 缓存命中率阈值
+  
+  # 数据增强配置
+  patch_augmentation: false                 # patch级数据增强 (DISABLED: 解决颜色偏移问题)
+  augmentation_probability: 0.0             # 数据增强概率 (DISABLED)
+  
+  # 质量控制
+  min_hole_area: 100                        # 最小空洞面积
+  max_hole_area: 10000                      # 最大空洞面积
+  boundary_margin: 16                       # 边界保留边距
+
+# ==================== 训练调度配置 ====================
+schedule:
+  # 训练阶段配置
+  patch_warmup_epochs: 20                   # patch模式热身阶段
+  mixed_training_epochs: 50                 # 混合训练阶段
+  full_fine_tuning_epochs: 30               # 全图fine-tuning阶段
+  
+  # 模式切换策略
+  initial_patch_probability: 0.9            # 初始patch概率
+  final_patch_probability: 0.3              # 最终patch概率
+  
+  # 自适应调度
+  enable_adaptive_scheduling: true          # 启用自适应调度
+  loss_patience: 5                          # 损失无改善容忍epochs
+  
+  # 性能阈值
+  patch_efficiency_threshold: 1.5           # patch效率阈值（相比full模式）
+  quality_drop_threshold: 0.05              # 质量下降容忍阈值
+
+# ==================== 可视化配置 ====================
+visualization:
+  enable_visualization: true                # 启用可视化
+  visualization_frequency: 100              # 可视化频率（每N步）
+  save_frequency: 500                       # 保存频率（每N步）
+
+# ==================== 基准测试配置 ====================
+benchmark:
+  # 测试参数
+  test_epochs: 5                            # 测试epoch数
+  test_samples: 100                         # 每个测试的样本数
+  repeat_runs: 3                            # 重复运行次数
+  warmup_steps: 10                          # 预热步骤数
+  
+  # 内存监控
+  memory_monitoring: true                   # 启用内存监控
+  memory_check_interval: 0.1                # 内存检查间隔(秒)
+  
+  # 质量评估
+  quality_metrics:                          # 质量指标列表
+    - "loss"
+    - "psnr"
+    - "ssim"
+  convergence_patience: 10                  # 收敛耐心值
+  min_improvement: 0.001                    # 最小改善阈值
+  
+  # 统计分析
+  confidence_level: 0.95                    # 置信水平
+  significance_threshold: 0.05              # 显著性阈值
+  
+  # 输出控制
+  save_detailed_logs: true                  # 保存详细日志
+  generate_plots: true                      # 生成图表
+  save_raw_data: true                       # 保存原始数据
+
+# ==================== 高级配置 ====================
+advanced:
+  # 混合精度训练
+  use_mixed_precision: true                 # 使用混合精度
+  
+  # 梯度相关
+  gradient_clip_val: 1.0                    # 梯度裁剪值
+  accumulate_grad_batches: 1                # 梯度累积批次
+  
+  # 检查点
+  save_top_k: 3                             # 保存最好的K个模型
+  monitor_metric: "val_loss"                # 监控指标
+  
+  # 早停
+  early_stopping_patience: 15               # 早停耐心值
+  early_stopping_min_delta: 0.001          # 早停最小改善
+
+# ==================== 实验配置 ====================
+experiment:
+  name: "patch_training_v1"                 # 实验名称
+  description: "Patch-based mobile frame interpolation training"  # 实验描述
+  tags:                                     # 实验标签
+    - "patch-based"
+    - "mobile"
+    - "frame-interpolation"
+  
+  # 种子配置
+  seed: 42                                  # 随机种子
+  deterministic: false                      # 确定性训练（影响性能）

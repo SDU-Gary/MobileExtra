@@ -66,12 +66,13 @@ class DatasetSplitCreator:
             return {'valid': False, 'reason': 'missing_training_data'}
         
         try:
-            training_data = np.load(training_data_path)  # [6, H, W]
+            training_data = np.load(training_data_path)  # [7, H, W]
             
-            # 分离各通道
-            rgb = training_data[:3]        # RGB通道
-            mask = training_data[3:4]      # 掩码通道  
-            residual_mv = training_data[4:6]  # 残差MV通道
+            # 分离各通道 (7通道格式)
+            warped_rgb = training_data[:3]      # 外推RGB通道
+            semantic_holes = training_data[3:4] # 语义空洞掩码
+            occlusion_mask = training_data[4:5] # 遮挡掩码
+            residual_mv = training_data[5:7]    # 残差MV通道
             
             # 质量评估
             quality_info = {
