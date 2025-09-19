@@ -25,7 +25,7 @@ def load_test_modules():
         from src.npu.networks.residual_mv_guided_network import create_residual_mv_guided_network, ResidualMVGuidedNetwork
         from train.residual_inpainting_loss import create_residual_inpainting_loss
         
-        print("✅ 残差MV引导网络模块导入成功")
+        print(" 残差MV引导网络模块导入成功")
         return True
     except ImportError as e:
         print(f"❌ 模块导入失败: {e}")
@@ -178,13 +178,13 @@ def test_residual_mv_guided_network(device: torch.device) -> bool:
         param_count = model.get_parameter_count()
         memory_info = model.get_memory_usage(input_data.shape)
         
-        print(f"✅ 网络创建和前向传播成功")
-        print(f"📊 参数数量: {param_count:,}")
-        print(f"📊 输入形状: {input_data.shape}")
-        print(f"📊 输出形状: {output.shape}")
-        print(f"📊 前向时间: {forward_time:.2f} ms")
-        print(f"📊 预估内存: {memory_info['total_estimated_mb']:.1f} MB")
-        print(f"📊 输出范围: [{output.min():.3f}, {output.max():.3f}]")
+        print(f" 网络创建和前向传播成功")
+        print(f" 参数数量: {param_count:,}")
+        print(f" 输入形状: {input_data.shape}")
+        print(f" 输出形状: {output.shape}")
+        print(f" 前向时间: {forward_time:.2f} ms")
+        print(f" 预估内存: {memory_info['total_estimated_mb']:.1f} MB")
+        print(f" 输出范围: [{output.min():.3f}, {output.max():.3f}]")
         
         return True
         
@@ -238,7 +238,7 @@ def test_residual_learning_functionality(device: torch.device) -> bool:
             if hasattr(model, 'get_intermediate_outputs'):
                 intermediate = model.get_intermediate_outputs(input_data)
                 
-                print("📊 中间输出分析:")
+                print(" 中间输出分析:")
                 for key, tensor in intermediate.items():
                     print(f"   {key}: {tensor.shape}, 范围=[{tensor.min():.3f}, {tensor.max():.3f}]")
                 
@@ -248,10 +248,10 @@ def test_residual_learning_functionality(device: torch.device) -> bool:
                     composed_output = warped_rgb + correction
                     
                     composition_error = torch.abs(output - composed_output).mean()
-                    print(f"📊 残差组合验证误差: {composition_error:.6f}")
+                    print(f" 残差组合验证误差: {composition_error:.6f}")
                     
                     if composition_error < 1e-5:
-                        print("✅ 残差组合验证通过")
+                        print(" 残差组合验证通过")
                     else:
                         print("⚠️  残差组合验证失败")
         
@@ -259,12 +259,12 @@ def test_residual_learning_functionality(device: torch.device) -> bool:
         residual_mse = torch.mean((predicted_residual - target_residual)**2)
         residual_magnitude = torch.mean(torch.abs(predicted_residual))
         
-        print(f"📊 残差学习分析:")
+        print(f" 残差学习分析:")
         print(f"   预测残差幅度: {residual_magnitude:.6f}")
         print(f"   残差MSE损失: {residual_mse:.6f}")
         print(f"   输出变化程度: {torch.mean(torch.abs(output - warped_rgb)):.6f}")
         
-        print("✅ 残差学习功能验证完成")
+        print(" 残差学习功能验证完成")
         return True
         
     except Exception as e:
@@ -274,7 +274,7 @@ def test_residual_learning_functionality(device: torch.device) -> bool:
 def test_residual_inpainting_loss(device: torch.device) -> bool:
     """测试残差补洞损失函数"""
     
-    print("\n🎯 测试残差补洞损失函数")
+    print("\n 测试残差补洞损失函数")
     print("-" * 50)
     
     try:
@@ -308,19 +308,19 @@ def test_residual_inpainting_loss(device: torch.device) -> bool:
         # 计算损失
         total_loss, loss_dict = loss_fn(predicted_output, target_data, input_data)
         
-        print(f"✅ 残差补洞损失函数测试成功")
-        print(f"📊 总损失: {total_loss.item():.6f}")
-        print(f"📊 损失分解:")
+        print(f" 残差补洞损失函数测试成功")
+        print(f" 总损失: {total_loss.item():.6f}")
+        print(f" 损失分解:")
         for key, value in loss_dict.items():
             print(f"   {key}: {value:.6f}")
         
         # 验证损失权重
         weights = loss_fn.get_loss_weights()
-        print(f"📊 损失权重:")
+        print(f" 损失权重:")
         for key, value in weights.items():
             print(f"   {key}: {value}")
         
-        print("✅ 残差补洞损失函数验证完成")
+        print(" 残差补洞损失函数验证完成")
         return True
         
     except Exception as e:
@@ -330,7 +330,7 @@ def test_residual_inpainting_loss(device: torch.device) -> bool:
 def test_spatial_attention_mechanism(device: torch.device) -> bool:
     """测试空间注意力机制"""
     
-    print("\n🎯 测试空间注意力机制")
+    print("\n 测试空间注意力机制")
     print("-" * 50)
     
     try:
@@ -355,7 +355,7 @@ def test_spatial_attention_mechanism(device: torch.device) -> bool:
         with torch.no_grad():
             spatial_attention, mv_urgency = attention_gen(holes_mask, occlusion_mask, residual_mv)
         
-        print(f"📊 空间注意力分析:")
+        print(f" 空间注意力分析:")
         print(f"   注意力形状: {spatial_attention.shape}")
         print(f"   注意力范围: [{spatial_attention.min():.3f}, {spatial_attention.max():.3f}]")
         print(f"   MV紧急程度形状: {mv_urgency.shape}")
@@ -380,7 +380,7 @@ def test_spatial_attention_mechanism(device: torch.device) -> bool:
             print(f"   MV平均强度: {mv_urgency.mean():.3f}")
             
             if mask_attention > non_mask_attention + 0.01:  # 增加一个小的阈值
-                print("✅ 空间注意力机制工作正常")
+                print(" 空间注意力机制工作正常")
             else:
                 print("⚠️  空间注意力机制可能需要调整")
                 # 提供调试信息
@@ -418,7 +418,7 @@ def test_gated_convolution(device: torch.device) -> bool:
         with torch.no_grad():
             output = gated_conv(test_input)
         
-        print(f"📊 门控卷积测试:")
+        print(f" 门控卷积测试:")
         print(f"   输入形状: {test_input.shape}")
         print(f"   输出形状: {output.shape}")
         print(f"   输出范围: [{output.min():.3f}, {output.max():.3f}]")
@@ -433,7 +433,7 @@ def test_gated_convolution(device: torch.device) -> bool:
         print(f"   与普通卷积差异: {difference:.3f}")
         
         if difference > 0.1:
-            print("✅ 门控卷积功能正常")
+            print(" 门控卷积功能正常")
         else:
             print("⚠️  门控卷积可能退化为普通卷积")
         
@@ -446,7 +446,7 @@ def test_gated_convolution(device: torch.device) -> bool:
 def comprehensive_architecture_test() -> bool:
     """综合架构测试"""
     
-    print("🔧 残差MV引导网络综合测试")
+    print(" 残差MV引导网络综合测试")
     print("=" * 60)
     
     # 设备设置
@@ -477,21 +477,21 @@ def comprehensive_architecture_test() -> bool:
     
     # 总结
     print("\n" + "=" * 60)
-    print("🎯 测试总结:")
-    print(f"📊 总测试数: {len(results)}")
-    print(f"✅ 成功: {sum(results)}")
+    print(" 测试总结:")
+    print(f" 总测试数: {len(results)}")
+    print(f" 成功: {sum(results)}")
     print(f"❌ 失败: {len(results) - sum(results)}")
     
     if all(results):
         print("\n🎉 所有测试通过！残差MV引导网络准备就绪")
         print("\n💡 关键验证完成:")
-        print("   ✅ 网络架构正确实现")
-        print("   ✅ 残差学习机制正常")
-        print("   ✅ 损失函数功能完整")
-        print("   ✅ 空间注意力有效")
-        print("   ✅ 门控卷积工作正常")
+        print("    网络架构正确实现")
+        print("    残差学习机制正常")
+        print("    损失函数功能完整")
+        print("    空间注意力有效")
+        print("    门控卷积工作正常")
         
-        print("\n🚀 启动残差MV引导网络训练:")
+        print("\n 启动残差MV引导网络训练:")
         print("   python train/ultra_safe_train.py --config configs/residual_mv_guided_config.yaml")
         
     else:

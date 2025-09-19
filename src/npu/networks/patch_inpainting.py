@@ -34,7 +34,7 @@ class PatchInpaintingConfig:
     enable_patch_mode: bool = True
     hole_detector: HoleDetectorConfig = None
     patch_extractor: PatchExtractorConfig = None
-    patch_network_channels: int = 24  # 🔧 REVERT: 回退到稳定的24通道
+    patch_network_channels: int = 24  #  REVERT: 回退到稳定的24通道
     fusion_mode: str = "weighted_replace"  # weighted_replace, alpha_blend
     fusion_feather_size: int = 4
     enable_color_correction: bool = True

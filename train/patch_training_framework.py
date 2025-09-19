@@ -33,7 +33,7 @@ try:
 except ImportError as e:
     print(f"Training framework import warning: {e}")
     class PerceptualLoss(nn.Module):
-        """🔧 UPGRADED: 真正的VGG感知损失实现"""
+        """ UPGRADED: 真正的VGG感知损失实现"""
         def __init__(self):
             super().__init__()
             
@@ -229,16 +229,53 @@ except ImportError:
 # 导入patch可视化组件
 try:
     from patch_tensorboard_logger import create_patch_visualizer, PatchTensorBoardLogger
+    TENSORBOARD_AVAILABLE = True
 except ImportError:
     try:
         from train.patch_tensorboard_logger import create_patch_visualizer, PatchTensorBoardLogger
-    except ImportError:
-        print("Patch TensorBoard可视化导入警告")
+        TENSORBOARD_AVAILABLE = True
+        print(" TensorBoard可视化: train模块导入成功")
+    except ImportError as e:
+        print(f"⚠️ Patch TensorBoard可视化导入警告: {e}")
+        TENSORBOARD_AVAILABLE = False
+        
+        #  FIX: 提供完整的fallback实现以确保训练不中断
         def create_patch_visualizer(log_dir, config=None):
-            return None
+            """Fallback可视化器 - 提供基本功能但不执行实际记录"""
+            class FallbackVisualizer:
+                def __init__(self, log_dir, config):
+                    self.log_dir = log_dir
+                    self.config = config or {}
+                    self.vis_frequency = config.get('visualization_frequency', 100) if config else 100
+                    self.save_frequency = config.get('save_frequency', 500) if config else 500
+                    print(f"🔄 使用Fallback可视化器: {log_dir}")
+                
+                def should_visualize(self, step):
+                    return step % self.vis_frequency == 0
+                
+                def log_patch_visualization(self, *args, **kwargs):
+                    pass
+                
+                def log_patch_comparison(self, *args, **kwargs):
+                    pass
+                
+                def log_training_step(self, *args, **kwargs):
+                    pass
+                
+                def log_validation_step(self, *args, **kwargs):
+                    pass
+                
+                def log_training_progress(self, *args, **kwargs):
+                    pass
+                
+                def close(self):
+                    pass
+            
+            return FallbackVisualizer(log_dir, config)
+        
         class PatchTensorBoardLogger:
             def __init__(self, *args, **kwargs):
-                pass
+                print("🔄 使用Fallback TensorBoard Logger")
             def log_patch_visualization(self, *args, **kwargs):
                 pass
             def log_patch_comparison(self, *args, **kwargs):
@@ -396,13 +433,13 @@ class PatchAwareLoss(nn.Module):
     
     def _compute_boundary_loss(self, pred: torch.Tensor, target: torch.Tensor, 
                               patch_metadata: List[Dict]) -> torch.Tensor:
-        """计算边界感知损失 - 🔧 FIXED: 自适应边界检测，不依赖metadata"""
+        """计算边界感知损失 -  FIXED: 自适应边界检测，不依赖metadata"""
         batch_size = pred.shape[0]
         
         if batch_size == 0:
             return torch.tensor(0.0, device=pred.device)
         
-        # 🔧 NEW: 自动边界检测，不依赖外部metadata
+        #  NEW: 自动边界检测，不依赖外部metadata
         total_boundary_loss = 0.0
         
         # 确保boundary_kernel在正确设备上
@@ -414,7 +451,7 @@ class PatchAwareLoss(nn.Module):
             patch_pred = pred[i:i+1]  # [1, 3, H, W]
             patch_target = target[i:i+1]  # [1, 3, H, W]
             
-            # 🔧 NEW: 多种边界检测策略组合
+            #  NEW: 多种边界检测策略组合
             # 1. 基于目标图像的边缘检测
             target_gray = torch.mean(patch_target, dim=1, keepdim=True)  # [1, 1, H, W]
             target_edges = F.conv2d(target_gray, self.boundary_kernel, padding=1)
@@ -555,7 +592,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         inpainting_config = model_config.get('inpainting_network', {})
         patch_inpainting_config = PatchInpaintingConfig(
             enable_patch_mode=self.patch_config.enable_patch_mode,
-            patch_network_channels=24  # 🔧 REVERT: 回退到稳定的24通道配置
+            patch_network_channels=24  #  REVERT: 回退到稳定的24通道配置
         )
         
         self.student_model = PatchBasedInpainting(
@@ -564,7 +601,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             config=patch_inpainting_config
         )
         
-        # 🔧 NEW: 启动时输出模型配置信息
+        #  NEW: 启动时输出模型配置信息
         self._print_model_architecture_info(inpainting_config, patch_inpainting_config)
         
         # 注意：删除了fallback全图网络，现在只专注patch训练
@@ -700,7 +737,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
                 
         except Exception as e:
             print(f"ERROR: Batch数据验证失败: {e}")
-            # 🔧 FIX: 添加类型检查，避免对list调用keys()
+            #  FIX: 添加类型检查，避免对list调用keys()
             if isinstance(batch, dict):
                 print(f"Batch keys: {list(batch.keys())}")
                 if 'patch_input' in batch:
@@ -750,7 +787,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             # Patch网络推理 - 输出残差预测（传入 boundary_override）
             residual_pred = self.student_model.patch_network(patch_input, boundary_override=boundary_override)
             
-            # 🔧 使用统一的残差学习工具类
+            #  使用统一的残差学习工具类
             try:
                 from residual_learning_helper import ResidualLearningHelper
             except ImportError:
@@ -800,7 +837,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         
         if self.patch_visualizer and self.patch_visualizer.should_visualize(current_global_step):
             try:
-                # 🔧 记录patch对比（输入|目标RGB|重建图像）- 残差学习版本
+                #  记录patch对比（输入|目标RGB|重建图像）- 残差学习版本
                 if 'patch' in predictions and 'patch' in targets:
                     self.patch_visualizer.log_patch_comparison(
                         step=current_global_step,
@@ -841,7 +878,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         predictions = {}
         targets = {}
         
-        # 🔧 处理残差学习验证数据
+        #  处理残差学习验证数据
         if 'patch_input' in batch and len(batch['patch_input']) > 0:
             patch_input = batch['patch_input']
             patch_target_rgb = batch['patch_target_rgb'] # 获取目标RGB用于生成boundary_override
@@ -890,7 +927,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         
         if self.patch_visualizer and self.current_epoch % 5 == 0:  # 每5个epoch记录验证图像
             try:
-                # 🔧 验证可视化 - 残差学习版本
+                #  验证可视化 - 残差学习版本
                 if 'patch' in predictions and 'patch' in targets:
                     self.patch_visualizer.log_patch_comparison(
                         step=current_global_step,
@@ -925,7 +962,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         learning_rate = float(optimizer_config.get('learning_rate', 1e-4))
         weight_decay = float(optimizer_config.get('weight_decay', 1e-5))
         
-        print(f"📊 优化器配置: lr={learning_rate}, weight_decay={weight_decay}")
+        print(f" 优化器配置: lr={learning_rate}, weight_decay={weight_decay}")
         
         optimizer = optim.AdamW(
             self.student_model.parameters(),
@@ -940,7 +977,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         T_max = int(scheduler_config.get('T_max', 100))
         eta_min = float(scheduler_config.get('eta_min', 1e-6))
         
-        print(f"📊 调度器配置: T_max={T_max}, eta_min={eta_min}")
+        print(f" 调度器配置: T_max={T_max}, eta_min={eta_min}")
         
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
@@ -1012,7 +1049,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         }
     
     def _print_model_architecture_info(self, inpainting_config: Dict[str, Any], patch_inpainting_config) -> None:
-        """🔧 NEW: 启动时输出模型架构信息，便于验证配置正确性"""
+        """ NEW: 启动时输出模型架构信息，便于验证配置正确性"""
         print("\n" + "="*70)
         print("🏗️  模型架构配置信息")
         print("="*70)
@@ -1023,15 +1060,15 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         base_channels = inpainting_config.get('base_channels', 64)
         patch_network_channels = patch_inpainting_config.patch_network_channels
         
-        print(f"📊 网络类型: PatchBasedInpainting (patch训练框架)")
-        print(f"📊 输入通道数: {input_channels}")
-        print(f"📊 输出通道数: {output_channels}")
-        print(f"📊 配置文件base_channels: {base_channels}")
-        print(f"📊 实际patch_network_channels: {patch_network_channels}")
+        print(f" 网络类型: PatchBasedInpainting (patch训练框架)")
+        print(f" 输入通道数: {input_channels}")
+        print(f" 输出通道数: {output_channels}")
+        print(f" 配置文件base_channels: {base_channels}")
+        print(f" 实际patch_network_channels: {patch_network_channels}")
         
         # 验证配置一致性
         if base_channels == patch_network_channels:
-            print(f"✅ 配置一致性检查: 通过 (base_channels = patch_network_channels = {base_channels})")
+            print(f" 配置一致性检查: 通过 (base_channels = patch_network_channels = {base_channels})")
         else:
             print(f"⚠️  配置不一致: base_channels={base_channels}, patch_network_channels={patch_network_channels}")
         
@@ -1041,14 +1078,14 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             total_params = sum(p.numel() for p in patch_network.parameters())
             trainable_params = sum(p.numel() for p in patch_network.parameters() if p.requires_grad)
             
-            print(f"📊 PatchNetwork参数统计:")
+            print(f" PatchNetwork参数统计:")
             print(f"   - 总参数量: {total_params:,}")
             print(f"   - 可训练参数: {trainable_params:,}")
             print(f"   - 参数大小: {total_params * 4 / 1024 / 1024:.2f} MB")
             
             # 如果可以访问网络结构，显示通道配置
             if hasattr(patch_network, 'ch1'):
-                print(f"📊 Enhanced PatchNetwork通道架构:")
+                print(f" Enhanced PatchNetwork通道架构:")
                 print(f"   - ch1 (Level 1): {patch_network.ch1}")
                 print(f"   - ch2 (Level 2): {patch_network.ch2}")
                 print(f"   - ch3 (Level 3): {patch_network.ch3}")
@@ -1057,11 +1094,11 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         
         # 训练模式配置
         learning_mode = inpainting_config.get('learning_mode', 'residual')
-        print(f"📊 学习模式: {learning_mode}")
+        print(f" 学习模式: {learning_mode}")
         
         # Patch配置信息
         if hasattr(self, 'patch_config'):
-            print(f"📊 Patch配置:")
+            print(f" Patch配置:")
             print(f"   - Patch模式: {'启用' if self.patch_config.enable_patch_mode else '禁用'}")
             if hasattr(self.patch_config, 'patch_size'):
                 print(f"   - Patch大小: {self.patch_config.patch_size}x{self.patch_config.patch_size}")
@@ -1172,7 +1209,7 @@ def main():
     
     # 训练模式 - 加载配置文件
     try:
-        print(f"📄 加载配置文件: {args.config}")
+        print(f" 加载配置文件: {args.config}")
         
         if not os.path.exists(args.config):
             print(f" 配置文件不存在: {args.config}")
@@ -1200,7 +1237,7 @@ def main():
 def run_patch_training(config: Dict[str, Any]) -> bool:
     """运行Patch训练流程"""
     try:
-        print("🚀 启动Patch训练流程...")
+        print(" 启动Patch训练流程...")
         
         # 提取配置sections
         network_config = config.get('network', {})
@@ -1210,17 +1247,17 @@ def run_patch_training(config: Dict[str, Any]) -> bool:
         loss_config = config.get('loss', {})
         monitoring_config = config.get('monitoring', {})
         
-        print(f"📊 网络配置: {network_config.get('type', 'Unknown')}")
-        print(f"📊 训练批次: {training_config.get('batch_size', 'Unknown')}")
-        print(f"📊 Patch模式: {'启用' if patch_config_dict.get('enable_patch_mode', False) else '禁用'}")
-        print(f"📊 简单网格: {'启用' if patch_config_dict.get('use_simple_grid_patches', False) else '禁用'}")
+        print(f" 网络配置: {network_config.get('type', 'Unknown')}")
+        print(f" 训练批次: {training_config.get('batch_size', 'Unknown')}")
+        print(f" Patch模式: {'启用' if patch_config_dict.get('enable_patch_mode', False) else '禁用'}")
+        print(f" 简单网格: {'启用' if patch_config_dict.get('use_simple_grid_patches', False) else '禁用'}")
         
         # 创建训练器配置
         model_config = {
             'inpainting_network': {
                 'input_channels': network_config.get('input_channels', 7),
                 'output_channels': network_config.get('output_channels', 3),
-                'base_channels': network_config.get('base_channels', 24)  # 🔧 REVERT: 回退到稳定的24通道
+                'base_channels': network_config.get('base_channels', 24)  #  REVERT: 回退到稳定的24通道
             }
         }
         
@@ -1263,7 +1300,7 @@ def run_patch_training(config: Dict[str, Any]) -> bool:
         )
         
         print(" Patch训练器创建成功")
-        print(f"📊 网络参数: {sum(p.numel() for p in trainer.student_model.parameters()):,}")
+        print(f" 网络参数: {sum(p.numel() for p in trainer.student_model.parameters()):,}")
         
         # 创建数据加载器
         success = setup_data_loaders(trainer, data_config, patch_training_config)
@@ -1272,7 +1309,7 @@ def run_patch_training(config: Dict[str, Any]) -> bool:
             return False
         
         # 开始训练
-        print("🎯 开始训练循环...")
+        print(" 开始训练循环...")
         
         # 创建PyTorch Lightning Trainer
         max_epochs = trainer_config.get('max_epochs', 100)
@@ -1325,14 +1362,14 @@ def run_patch_training(config: Dict[str, Any]) -> bool:
             enable_model_summary=True
         )
         
-        print(f"📊 Lightning Trainer配置:")
+        print(f" Lightning Trainer配置:")
         print(f"   最大轮数: {max_epochs}")
         print(f"   设备: {pl_trainer.accelerator} ({pl_trainer.num_devices})")
         print(f"   日志目录: {monitoring_config.get('tensorboard_log_dir', './logs/colleague_training')}")
         print(f"   模型保存: {monitoring_config.get('model_save_dir', './models/colleague')}")
         
         # 启动训练
-        print("🚀 启动PyTorch Lightning训练...")
+        print(" 启动PyTorch Lightning训练...")
         pl_trainer.fit(
             model=trainer,
             train_dataloaders=trainer.train_loader,
@@ -1365,7 +1402,7 @@ class ColleaguePatchDataset(Dataset):
         
         # 初始化简单网格提取器
         if patch_config.use_simple_grid_patches:
-            print("🎯 初始化SimplePatchExtractor")
+            print(" 初始化SimplePatchExtractor")
             
             try:
                 # 导入并创建SimplePatchExtractor
@@ -1482,7 +1519,7 @@ class ColleaguePatchDataset(Dataset):
             patch_target_residual = torch.from_numpy(patch_target_residual).float()
             patch_target_rgb = torch.from_numpy(patch_target_rgb).float()
             
-            # 🔧 UPDATED: 形状验证更新为支持非正方形patch (270x480)
+            #  UPDATED: 形状验证更新为支持非正方形patch (270x480)
             expected_h, expected_w = 270, 480  # 4x4网格切分后的patch尺寸
             assert patch_input.shape[0] == 7, f"输入patch通道数错误: {patch_input.shape[0]} (期望7)"
             assert patch_input.shape[1:] == (expected_h, expected_w), f"输入patch尺寸错误: {patch_input.shape[1:]} (期望{expected_h}x{expected_w})"
@@ -1491,7 +1528,7 @@ class ColleaguePatchDataset(Dataset):
             assert patch_target_rgb.shape[0] == 3, f"RGB目标patch通道数错误: {patch_target_rgb.shape[0]} (期望3)"
             assert patch_target_rgb.shape[1:] == (expected_h, expected_w), f"RGB目标patch尺寸错误: {patch_target_rgb.shape[1:]} (期望{expected_h}x{expected_w})"
             
-            # 🔧 FIX: 返回字典格式而不是tuple，符合PyTorch Lightning期望
+            #  FIX: 返回字典格式而不是tuple，符合PyTorch Lightning期望
             return {
                 'patch_input': patch_input,
                 'patch_target_residual': patch_target_residual,
@@ -1503,7 +1540,7 @@ class ColleaguePatchDataset(Dataset):
             import traceback
             traceback.print_exc()
             
-            # 🔧 FIX: 返回字典格式的零张量 (270x480尺寸)
+            #  FIX: 返回字典格式的零张量 (270x480尺寸)
             expected_h, expected_w = 270, 480  # 4x4网格切分后的patch尺寸
             return {
                 'patch_input': torch.zeros(7, expected_h, expected_w),
@@ -1515,7 +1552,7 @@ class ColleaguePatchDataset(Dataset):
 def setup_data_loaders(trainer, data_config: Dict[str, Any], patch_config) -> bool:
     """设置数据加载器"""
     try:
-        print("📊 设置数据加载器...")
+        print(" 设置数据加载器...")
         
         # 根据dataset_type选择数据集
         dataset_type = data_config.get('dataset_type', 'colleague')
@@ -1524,7 +1561,7 @@ def setup_data_loaders(trainer, data_config: Dict[str, Any], patch_config) -> bo
             # 使用ColleagueDatasetAdapter的patch包装器
             from colleague_dataset_adapter import ColleagueDatasetAdapter
             
-            print("🔧 使用ColleagueDatasetAdapter + ColleaguePatchDataset")
+            print(" 使用ColleagueDatasetAdapter + ColleaguePatchDataset")
             
             # 创建ColleaguePatchDataset包装器
             train_dataset = ColleaguePatchDataset(
@@ -1539,8 +1576,8 @@ def setup_data_loaders(trainer, data_config: Dict[str, Any], patch_config) -> bo
                 patch_config=patch_config
             )
             
-            print(f"📊 训练样本: {len(train_dataset)} patches")
-            print(f"📊 验证样本: {len(val_dataset)} patches")
+            print(f" 训练样本: {len(train_dataset)} patches")
+            print(f" 验证样本: {len(val_dataset)} patches")
             
         else:
             print(f" 不支持的数据集类型: {dataset_type}")

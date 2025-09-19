@@ -45,12 +45,12 @@ def validate_config():
         grid_rows = patch_config.get('simple_grid_rows', 4)
         grid_cols = patch_config.get('simple_grid_cols', 4)
         
-        print(f"   ✅ 简单网格策略: {'启用' if simple_grid_enabled else '禁用'}")
-        print(f"   ✅ 复杂检测: {'禁用' if optimized_disabled else '启用'}")
-        print(f"   ✅ 网格配置: {grid_rows}x{grid_cols} = {grid_rows*grid_cols} patches")
+        print(f"    简单网格策略: {'启用' if simple_grid_enabled else '禁用'}")
+        print(f"    复杂检测: {'禁用' if optimized_disabled else '启用'}")
+        print(f"    网格配置: {grid_rows}x{grid_cols} = {grid_rows*grid_cols} patches")
         
         if simple_grid_enabled and optimized_disabled:
-            print("   🎯 简单网格策略配置正确！")
+            print("    简单网格策略配置正确！")
         else:
             print("     建议启用简单网格策略以提高训练稳定性")
         
@@ -58,10 +58,10 @@ def validate_config():
         network_config = config.get('network', {})
         training_config = config.get('training', {})
         
-        print(f"   📊 网络类型: {network_config.get('type', 'Unknown')}")
-        print(f"   📊 学习模式: {network_config.get('learning_mode', 'Unknown')}")
-        print(f"   📊 批次大小: {training_config.get('batch_size', 'Unknown')}")
-        print(f"   📊 最大轮数: {training_config.get('max_epochs', 'Unknown')}")
+        print(f"    网络类型: {network_config.get('type', 'Unknown')}")
+        print(f"    学习模式: {network_config.get('learning_mode', 'Unknown')}")
+        print(f"    批次大小: {training_config.get('batch_size', 'Unknown')}")
+        print(f"    最大轮数: {training_config.get('max_epochs', 'Unknown')}")
         
         return True
         
@@ -71,7 +71,7 @@ def validate_config():
 
 def check_dependencies():
     """检查依赖项"""
-    print("\n🔍 依赖检查:")
+    print("\n 依赖检查:")
     
     dependencies = [
         ("simple_patch_extractor.py", "简单网格提取器"),
@@ -86,7 +86,7 @@ def check_dependencies():
     all_good = True
     for file_path, description in dependencies:
         if os.path.exists(file_path):
-            print(f"   ✅ {description}: {file_path}")
+            print(f"    {description}: {file_path}")
         else:
             print(f"    {description}: {file_path} (缺失)")
             all_good = False
@@ -95,17 +95,17 @@ def check_dependencies():
 
 def check_data():
     """检查数据目录 - 针对NoiseBase数据格式"""
-    print("\n💾 数据检查:")
+    print("\n 数据检查:")
     
     data_root = "./data"  # 来自colleague_training_config.yaml
     processed_bistro_path = "./data/processed_bistro"  # NoiseBase数据路径
     
     if os.path.exists(data_root):
-        print(f"   ✅ 数据根目录存在: {data_root}")
+        print(f"    数据根目录存在: {data_root}")
         
         # 检查processed_bistro目录
         if os.path.exists(processed_bistro_path):
-            print(f"   ✅ NoiseBase数据目录存在: {processed_bistro_path}")
+            print(f"    NoiseBase数据目录存在: {processed_bistro_path}")
             
             # 检查必需的子目录和文件
             required_subdirs = {
@@ -124,7 +124,7 @@ def check_data():
                     # 计算EXR文件数量
                     exr_files = len([f for f in os.listdir(subdir_path) if f.endswith('.exr')])
                     data_files_found += exr_files
-                    status = "✅" if exr_files > 0 else " "
+                    status = "" if exr_files > 0 else " "
                     print(f"   {status} {subdir}: {exr_files} EXR文件 ({description})")
                 else:
                     print(f"    {subdir}: 目录不存在 ({description})")
@@ -146,8 +146,8 @@ def check_data():
                 print("   💡 关键目录: warp_hole(输入), ref(目标)")
                 return False
             else:
-                print(f"   🎯 数据概况: 总共 {data_files_found} 个EXR文件")
-                print("   ✅ 关键数据完整，可以开始训练")
+                print(f"    数据概况: 总共 {data_files_found} 个EXR文件")
+                print("    关键数据完整，可以开始训练")
                 return True
                 
         else:
@@ -162,7 +162,7 @@ def check_data():
 
 def start_training():
     """启动训练"""
-    print("\n🚀 启动训练:")
+    print("\n 启动训练:")
     
     # 选择训练脚本
     training_scripts = [
@@ -171,7 +171,7 @@ def start_training():
     
     print("选择训练脚本:")
     for i, (script, desc) in enumerate(training_scripts, 1):
-        exists = "✅" if os.path.exists(script) else ""
+        exists = "" if os.path.exists(script) else ""
         print(f"   {i}. {exists} {desc}")
     
     try:
@@ -182,7 +182,7 @@ def start_training():
             print(f" 训练脚本不存在: {selected_script}")
             return False
         
-        print(f"🎯 使用训练脚本: {selected_script}")
+        print(f" 使用训练脚本: {selected_script}")
         print(f"📋 使用配置文件: ./configs/colleague_training_config.yaml")
         
         # 启动训练
@@ -191,7 +191,7 @@ def start_training():
             "--config", "./configs/colleague_training_config.yaml"
         ]
         
-        print(f"🏃 执行命令: {' '.join(cmd)}")
+        print(f"执行命令: {' '.join(cmd)}")
         print("\n" + "="*60)
         print("训练启动中... (按 Ctrl+C 可终止)")
         print("="*60 + "\n")

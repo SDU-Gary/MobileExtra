@@ -1,21 +1,13 @@
-# 同事数据集训练配置
-# 基于现有的patch_training_config.yaml，适配ColleagueDatasetAdapter
-# 
-# 🔧 NEW: 已启用简单网格策略 (Simple Grid Patch Strategy)
-# 优势: 100%稳定性 | 固定16个patch | 极速处理 | 无复杂算法
-# 替代: 复杂hole detection (19%效率) → 4x4网格 (100%覆盖)
-
 # 数据配置
 data:
   data_root: "./data"  # 数据根目录 (包含processed_bistro)
   dataset_type: "colleague"  # 使用ColleagueDatasetAdapter
-  data_format: "processed_bistro"  # 🔧 NEW: 指定数据格式
+  data_format: "processed_bistro"  # 指定数据格式
   splits:
     train: "train"
     val: "val" 
     test: "test"
   
-  # 🔧 NoiseBase数据路径配置
   processed_bistro_path: "./data/processed_bistro"  # OpenEXR数据路径
   required_subdirs: ["warp_hole", "ref", "bistro"]  # 必需的子目录
 
@@ -25,21 +17,21 @@ patch:
   patch_height: 270  # 4x4网格切分后的patch高度 (1080/4)
   patch_width: 480   # 4x4网格切分后的patch宽度 (1920/4)  
   patch_size: 270    # 保持兼容性，主要用于内存估算
-  patch_mode_probability: 1.0  # 🔧 修改：始终使用patch模式以确保简单网格的一致性
+  patch_mode_probability: 1.0  # 始终使用patch模式以确保简单网格的一致性
   
-  # 🔧 NEW: 简单网格策略配置 (推荐用于训练稳定性)
+  # 简单网格策略配置 (推荐用于训练稳定性)
   use_simple_grid_patches: true      # 启用简单4x4网格策略
   use_optimized_patches: false       # 禁用复杂的hole detection
   
-  # 🔧 简单网格参数
+  # 简单网格参数
   simple_grid_rows: 4                # 网格行数 (短边)
   simple_grid_cols: 4                # 网格列数 (长边)
   simple_expected_height: 1080       # 预期输入高度
   simple_expected_width: 1920        # 预期输入宽度
   
   # 传统patch参数 (简单网格模式下会被覆盖)
-  min_patches_per_image: 16          # 🔧 修改：固定16个patch
-  max_patches_per_image: 16          # 🔧 修改：固定16个patch
+  min_patches_per_image: 16          # 固定16个patch
+  max_patches_per_image: 16          # 固定16个patch
   
   # 缓存配置（简单网格模式下暂时禁用）
   enable_patch_cache: false
@@ -54,10 +46,10 @@ network:
   type: "PatchNetwork"
   input_channels: 7  # 保持7通道输入不变
   output_channels: 3
-  base_channels: 64  # 🔧 NEW: 增加网络容量，base_channels 24→64
+  base_channels: 24  # 增加网络容量，base_channels 24→64
   learning_mode: "residual"  # 残差学习模式
   
-  # 🔧 NEW: 增强架构详情
+  # 增强架构详情
   architecture_details:
     encoder_layers: 5  # 5层编码器
     decoder_layers: 5  # 5层解码器
@@ -70,7 +62,7 @@ training:
   num_workers: 2
   learning_rate: 0.0005  # 经过优化的学习率 (5e-4)
   weight_decay: 0.0001  # 1e-4
-  max_epochs: 100
+  max_epochs: 200
   
   # 优化器配置
   optimizer: "AdamW"

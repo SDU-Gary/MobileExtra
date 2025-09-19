@@ -3,7 +3,7 @@
 Patch-Aware Dataset - Intelligent dataset supporting patch-based training
 
 Key features:
-- Built on UnifiedNoiseBaseDataset with full compatibility
+- Built on ColleagueDatasetAdapter for OpenEXR data
 - Dynamic patch generation based on hole masks
 - Efficient patch caching to avoid recomputation  
 - Patch-level augmentations and boundary handling
@@ -16,11 +16,12 @@ from typing import Tuple, List, Dict, Optional, Any
 import random
 from dataclasses import dataclass
 
-# Import base dataset
+#  FIX: 移除unified_dataset依赖，只支持colleague数据集
+# Import base dataset - colleague数据集处理
 try:
-    from .unified_dataset import UnifiedNoiseBaseDataset
+    from .colleague_dataset_adapter import ColleagueDatasetAdapter
 except ImportError:
-    from unified_dataset import UnifiedNoiseBaseDataset
+    from colleague_dataset_adapter import ColleagueDatasetAdapter
 
 # Import patch modules
 import sys
@@ -43,7 +44,7 @@ except ImportError:
         from hole_detector import HoleDetector, PatchInfo
         from patch_extractor import PatchExtractor, PatchPosition
 
-# 🔧 Import optimized patch system
+#  Import optimized patch system
 try:
     from optimized_patch_strategy import OptimizedPatchDetector, AdaptivePatchInfo, create_optimized_config
     from adaptive_patch_extractor import AdaptivePatchExtractor
@@ -51,7 +52,7 @@ try:
 except ImportError:
     OPTIMIZED_PATCH_AVAILABLE = False
 
-# 🔧 Import simple grid patch system
+#  Import simple grid patch system
 try:
     from simple_patch_extractor import SimplePatchExtractor, SimpleGridConfig
     SIMPLE_GRID_AVAILABLE = True
@@ -81,9 +82,9 @@ class PatchTrainingConfig:
     max_hole_area: int = 10000
     boundary_margin: int = 16
     
-    # 🔧 Patch extraction strategy configuration
+    #  Patch extraction strategy configuration
     use_optimized_patches: bool = True      # Enable optimized patch system
-    use_simple_grid_patches: bool = False   # 🔧 NEW: Use simple 4x4 grid strategy (most stable)
+    use_simple_grid_patches: bool = False   #  NEW: Use simple 4x4 grid strategy (most stable)
     
     # Optimized patch configuration (used when use_simple_grid_patches=False)
     optimized_tight_fitting: bool = True    # Enable tight fitting (5% oversizing)
@@ -91,7 +92,7 @@ class PatchTrainingConfig:
     optimized_waste_limit: float = 0.35     # Max 35% background waste
     optimized_coverage_target: float = 0.92 # Target 92% hole coverage
     
-    # 🔧 Simple grid patch configuration (used when use_simple_grid_patches=True)
+    #  Simple grid patch configuration (used when use_simple_grid_patches=True)
     simple_grid_rows: int = 4               # Grid rows (short side)
     simple_grid_cols: int = 4               # Grid columns (long side)
     simple_expected_height: int = 1080      # Expected input image height
@@ -174,7 +175,7 @@ class PatchAwareDataset(Dataset):
     """Patch-aware dataset for efficient patch-based training
     
     Features:
-    - Built on UnifiedNoiseBaseDataset with full compatibility
+    - Built on ColleagueDatasetAdapter for OpenEXR data
     - Intelligent patch generation based on hole distribution  
     - Efficient caching to avoid repeated patch extraction
     - Patch-level data augmentations
@@ -198,18 +199,17 @@ class PatchAwareDataset(Dataset):
         self.config = config or PatchTrainingConfig()
         self.base_augmentation = base_augmentation
         
-        # Initialize base dataset
-        self.base_dataset = UnifiedNoiseBaseDataset(
+        #  FIX: 初始化colleague数据集适配器
+        self.base_dataset = ColleagueDatasetAdapter(
             data_root=data_root,
-            split=split,
-            augmentation=base_augmentation
+            split=split
         )
         
         # Initialize patch components
         if self.config.enable_patch_mode:
-            # 🔧 Strategy 1: Simple Grid Patches (Most Stable for Training)
+            #  Strategy 1: Simple Grid Patches (Most Stable for Training)
             if self.config.use_simple_grid_patches and SIMPLE_GRID_AVAILABLE:
-                print("🎯 Using SimplePatchExtractor for maximum training stability")
+                print(" Using SimplePatchExtractor for maximum training stability")
                 simple_config = SimpleGridConfig(
                     grid_rows=self.config.simple_grid_rows,
                     grid_cols=self.config.simple_grid_cols,
@@ -223,9 +223,9 @@ class PatchAwareDataset(Dataset):
                 self._using_optimized_patches = False
                 print(f"   Grid: {self.config.simple_grid_rows}x{self.config.simple_grid_cols} = {self.config.simple_grid_rows*self.config.simple_grid_cols} patches per image")
                 
-            # 🔧 Strategy 2: Optimized Patch Detection (Complex but Adaptive)
+            #  Strategy 2: Optimized Patch Detection (Complex but Adaptive)
             elif OPTIMIZED_PATCH_AVAILABLE and self.config.use_optimized_patches:
-                print("🔧 Using OptimizedPatchDetector for better hole coverage and efficiency")
+                print(" Using OptimizedPatchDetector for better hole coverage and efficiency")
                 optimized_config = create_optimized_config()
                 
                 # Override with training config parameters
@@ -241,7 +241,7 @@ class PatchAwareDataset(Dataset):
                 self._using_optimized_patches = True
                 self._using_simple_grid = False
                 
-            # 🔧 Strategy 3: Original Patch Detection (Fallback)
+            #  Strategy 3: Original Patch Detection (Fallback)
             else:
                 print("⚠️  Using original patch detector (fallback)")
                 self.hole_detector = HoleDetector()
@@ -281,10 +281,10 @@ class PatchAwareDataset(Dataset):
             - 'mode': 'patch'
             - 'metadata': additional metadata
         """
-        # Get base data - UnifiedNoiseBaseDataset现在返回三元组
+        #  FIX: 获取colleague数据 - ColleagueDatasetAdapter返回三元组
         base_sample = self.base_dataset[index]
         
-        # 🔧 统一的残差学习三元组适配
+        #  统一的残差学习三元组适配
         try:
             from residual_learning_helper import ResidualLearningHelper
         except ImportError:
@@ -311,7 +311,7 @@ class PatchAwareDataset(Dataset):
         if isinstance(base_sample, tuple) and len(base_sample) == 3:
             input_data, target_residual, target_rgb = base_sample
             
-            # 🔧 验证数据一致性
+            #  验证数据一致性
             if not ResidualLearningHelper.validate_residual_data(input_data, target_residual, target_rgb):
                 # 重新计算以确保一致性
                 warped_rgb = input_data[:3]
@@ -323,7 +323,7 @@ class PatchAwareDataset(Dataset):
         elif isinstance(base_sample, tuple) and len(base_sample) == 2:
             input_data, target_rgb = base_sample
             warped_rgb = input_data[:3]
-            # 🔧 使用统一的残差计算
+            #  使用统一的残差计算
             target_residual = ResidualLearningHelper.compute_residual_target(target_rgb, warped_rgb)
             return input_data, target_residual, target_rgb
         
@@ -342,14 +342,14 @@ class PatchAwareDataset(Dataset):
             target_rgb = data[7:10]  # target_rgb [3, H, W]
             warped_rgb = input_data[:3]
             
-            # 🔧 使用统一的残差计算
+            #  使用统一的残差计算
             target_residual = ResidualLearningHelper.compute_residual_target(target_rgb, warped_rgb)
             return input_data, target_residual, target_rgb
     
     def _get_patch_sample(self, index: int, input_data: torch.Tensor, target_residual: torch.Tensor, target_rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Get patch mode sample"""
         
-        # 🔧 Strategy routing: Simple Grid vs Complex Detection
+        #  Strategy routing: Simple Grid vs Complex Detection
         if self._using_simple_grid:
             return self._get_simple_grid_patches(index, input_data, target_residual, target_rgb)
         else:
@@ -428,8 +428,8 @@ class PatchAwareDataset(Dataset):
         
         return {
             'input': batch_input,
-            'target_residual': batch_target_residual,  # 🔧 残差目标
-            'target_rgb': batch_target_rgb,            # 🔧 RGB目标  
+            'target_residual': batch_target_residual,  #  残差目标
+            'target_rgb': batch_target_rgb,            #  RGB目标  
             'mode': 'patch',
             'extraction_strategy': 'simple_grid',
             'metadata': {
@@ -499,7 +499,7 @@ class PatchAwareDataset(Dataset):
                 })
                 self.stats['cache_hits'] += 1
             else:
-                # Extract new patch - 🔧 残差学习: 同时提取残差和RGB patches
+                # Extract new patch -  残差学习: 同时提取残差和RGB patches
                 input_patches, input_positions = self.patch_extractor.extract_patches(
                     input_data.numpy(), [patch_info]
                 )
@@ -530,7 +530,7 @@ class PatchAwareDataset(Dataset):
                     patches_target_residual.append(patch_target_residual_tensor)
                     patches_target_rgb.append(patch_target_rgb_tensor)
                     
-                    # 🔧 Calculate efficiency for optimized patches
+                    #  Calculate efficiency for optimized patches
                     patch_metadata = {
                         'patch_info': patch_info,
                         'position': input_positions[0],
@@ -577,7 +577,7 @@ class PatchAwareDataset(Dataset):
             # Fallback to center patch if extraction failed
             return self._get_fallback_center_patch(input_data, target_residual, target_rgb, index)
         
-        # Convert to tensors - 🔧 残差学习: 返回残差和RGB
+        # Convert to tensors -  残差学习: 返回残差和RGB
         batch_input = torch.stack(patches_input)                    # [N, 7, 128, 128]
         batch_target_residual = torch.stack(patches_target_residual)  # [N, 3, 128, 128]
         batch_target_rgb = torch.stack(patches_target_rgb)          # [N, 3, 128, 128]
@@ -590,7 +590,7 @@ class PatchAwareDataset(Dataset):
             max(self.stats['patch_mode_count'], 1)
         )
         
-        # 🔧 Update optimized patch statistics
+        #  Update optimized patch statistics
         if self._using_optimized_patches and hasattr(self, '_efficiency_samples'):
             if self._efficiency_samples:
                 self.stats['optimized_patch_efficiency'] = np.mean(self._efficiency_samples)
@@ -598,8 +598,8 @@ class PatchAwareDataset(Dataset):
         
         return {
             'input': batch_input,
-            'target_residual': batch_target_residual,  # 🔧 残差目标
-            'target_rgb': batch_target_rgb,            # 🔧 RGB目标  
+            'target_residual': batch_target_residual,  #  残差目标
+            'target_rgb': batch_target_rgb,            #  RGB目标  
             'mode': 'patch',
             'extraction_strategy': 'complex_detection',
             'metadata': {
@@ -729,7 +729,7 @@ class PatchAwareDataset(Dataset):
 
 
 def patch_aware_collate_fn(batch):
-    """Custom collate function for patch batch data - 🔧 残差学习版本
+    """Custom collate function for patch batch data -  残差学习版本
     
     Note: Module-level function required for multiprocessing serialization
     """
@@ -747,8 +747,8 @@ def patch_aware_collate_fn(batch):
     
     result = {
         'patch_input': torch.cat(all_patch_inputs, dim=0),
-        'patch_target_residual': torch.cat(all_patch_target_residuals, dim=0),  # 🔧 残差目标
-        'patch_target_rgb': torch.cat(all_patch_target_rgbs, dim=0),            # 🔧 RGB目标
+        'patch_target_residual': torch.cat(all_patch_target_residuals, dim=0),  #  残差目标
+        'patch_target_rgb': torch.cat(all_patch_target_rgbs, dim=0),            #  RGB目标
         'patch_metadata': patch_metadata,
         'modes': [sample['mode'] for sample in batch],
         'batch_info': {

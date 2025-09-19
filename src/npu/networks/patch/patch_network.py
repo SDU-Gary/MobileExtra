@@ -3,7 +3,6 @@
 Patch专用网络 - 支持任意尺寸输入的轻量级补全网络 (如270x480)
 
 U-Net结构，轻量化通道数：24->48->96，参数量减少75%
-🔧 FIX: 添加skip connection尺寸自适应，支持非正方形输入
 """
 
 import torch
@@ -160,17 +159,17 @@ class PatchFFCBlock(nn.Module):
 class PatchNetwork(nn.Module):
     """Enhanced Patch专用残差学习网络 - 支持任意尺寸输入(如270x480)，5层U-Net架构，~2.8M参数
     
-    🔧 核心改进:
+     核心改进:
     - 边界掩码一致性: 网络与损失函数都使用图像边缘检测，完全对齐优化目标
     - 网络容量增强: base_channels 24→64，通道数增加2.67倍，深度扩展至5层
     - 渐进式特征提取: 64→96→128→192→256，优化参数效率
     
-    🔧 残差学习模式:
+     残差学习模式:
     - 网络输出: residual_prediction (范围 [-1, 1])
     - 最终结果: warped_rgb + residual_prediction * scale_factor
     - 优势: 简化学习任务，仅学习差异部分
     
-    🔧 架构特点:
+     架构特点:
     - 5层编码器-解码器: 4次下采样 + 4次上采样，深层特征建模
     - 边界感知门控卷积: 每层都具备边界敏感性，与损失函数语义对齐
     - 轻量级自注意力: 256通道瓶颈层全局建模，~32K参数
@@ -241,11 +240,11 @@ class PatchNetwork(nn.Module):
     
     def _generate_boundary_mask(self, x):
         """
-        🔧 FIXED: 边界掩码现在与损失函数保持一致
+         FIXED: 边界掩码现在与损失函数保持一致
         使用图像边缘检测而非空洞检测，确保网络优化目标与损失函数对齐
         """
         if x.shape[1] >= 3:
-            # 🔧 NEW: 使用warped_rgb (前3通道) 进行边缘检测，与损失函数一致
+            #  NEW: 使用warped_rgb (前3通道) 进行边缘检测，与损失函数一致
             warped_rgb = x[:, :3]  # 提取warped RGB图像
             
             # 转换为灰度图进行边缘检测
@@ -254,10 +253,10 @@ class PatchNetwork(nn.Module):
             # 应用边缘检测卷积核（与损失函数相同的kernel）
             edges = F.conv2d(rgb_gray, self.boundary_kernel, padding=1)
             
-            # 🔧 使用与损失函数相同的激活方式
+            #  使用与损失函数相同的激活方式
             boundary_mask = torch.sigmoid(torch.abs(edges) * 1.0)
             
-            # 🔧 可选：如果有空洞信息，可以作为额外增强
+            #  可选：如果有空洞信息，可以作为额外增强
             if x.shape[1] > 3:
                 hole_mask = x[:, 3:4]  # 空洞掩码
                 hole_edges = F.conv2d(hole_mask, self.boundary_kernel, padding=1)
@@ -294,7 +293,7 @@ class PatchNetwork(nn.Module):
         
         x_input = self.input_proj(x, boundary_mask)
         
-        # 🔧 NEW: 5层编码器前向传播
+        #  NEW: 5层编码器前向传播
         e1 = self.encoder1(x_input, boundary_mask)
         d1 = self.down1(e1, boundary_mask)
         
@@ -311,7 +310,7 @@ class PatchNetwork(nn.Module):
         
         bottleneck_out = self.bottleneck(e5)
         
-        # 🔧 NEW: 5层解码器前向传播，对称skip connections
+        #  NEW: 5层解码器前向传播，对称skip connections
         u1 = self.up1(bottleneck_out)
         if u1.shape[2:] != e4.shape[2:]:
             u1 = F.interpolate(u1, size=e4.shape[2:], mode='bilinear', align_corners=False)
@@ -340,11 +339,11 @@ class PatchNetwork(nn.Module):
         u4 = self.up_conv4(u4, boundary_mask)
         u4 = self.decoder4(u4, boundary_mask)
         
-        # 🔧 残差学习: 网络输出残差预测
+        #  残差学习: 网络输出残差预测
         residual_prediction = self.output_conv(u4)
         residual_prediction = self.output_activation(residual_prediction)  # [-1, 1]
         
-        # 🔧 FIX: 确保输出尺寸与输入完全匹配
+        #  FIX: 确保输出尺寸与输入完全匹配
         if residual_prediction.shape[2:] != x.shape[2:]:
             residual_prediction = F.interpolate(residual_prediction, size=x.shape[2:], mode='bilinear', align_corners=False)
         
@@ -377,7 +376,7 @@ class PatchNetwork(nn.Module):
         return {
             **param_info,
             'model_size_mb': model_size_mb,
-            'target_size_mb': 8.0,  # 🔧 NEW: 增加目标大小以适应更大容量
+            'target_size_mb': 8.0,  #  NEW: 增加目标大小以适应更大容量
             'compression_ratio': 8.0 / model_size_mb if model_size_mb > 0 else 0,
             'architecture': 'Enhanced PatchNetwork (5-Layer U-Net + Edge-Aligned Boundary + Gated Conv + Self-Attention + Residual Learning)',
             'channel_progression': '64 → 96 → 128 → 192 → 256 (bottleneck)',

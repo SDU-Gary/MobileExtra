@@ -16,10 +16,10 @@ This is a **Mobile Real-Time Frame Interpolation and Hole Filling System** that 
 
 ### Core Features
 
-- **🎯 Patch-Based Training**: Intelligent patch detection and selective repair for optimal efficiency
+- ** Patch-Based Training**: Intelligent patch detection and selective repair for optimal efficiency
 - **⚡ Ultra-Low Latency**: <8ms total latency, <1ms GPU warp processing  
-- **💾 Lightweight Model**: <3M parameters, INT8 quantization support
-- **🔧 Smart Degradation**: 5-level dynamic degradation with temperature/battery adaptation
+- ** Lightweight Model**: <3M parameters, INT8 quantization support
+- ** Smart Degradation**: 5-level dynamic degradation with temperature/battery adaptation
 - **📱 Cross-Platform**: Android/iOS support, mainstream mobile chip adaptation
 
 ### Quick Start
@@ -126,11 +126,11 @@ MobileExtra/
 
 ### Development Status
 
-- ✅ **Patch-Based Training System** - Complete with intelligent detection
-- ✅ **Ultra-Safe Memory Management** - Stable training with automatic optimization
-- ✅ **Residual MV-Guided Network** - Selective inpainting architecture
-- ✅ **Multi-Component Loss Functions** - VGG perceptual + edge + boundary losses
-- ✅ **Unified Data Processing** - NoiseBase dataset support with preprocessing
+-  **Patch-Based Training System** - Complete with intelligent detection
+-  **Ultra-Safe Memory Management** - Stable training with automatic optimization
+-  **Residual MV-Guided Network** - Selective inpainting architecture
+-  **Multi-Component Loss Functions** - VGG perceptual + edge + boundary losses
+-  **Unified Data Processing** - NoiseBase dataset support with preprocessing
 - 🔄 **C++ Core Modules** - Headers complete, implementations in progress
 - 🔄 **Mobile Deployment** - Platform adapters ready, integration ongoing
 
@@ -148,10 +148,10 @@ MobileExtra/
 
 ### 核心特性
 
-- **🎯 补丁训练架构**：智能补丁检测和选择性修复，实现最优效率
+- ** 补丁训练架构**：智能补丁检测和选择性修复，实现最优效率
 - **⚡ 超低延迟**：总延迟<8ms，GPU变形处理<1ms
-- **💾 轻量模型**：参数<3M，支持INT8量化部署
-- **🔧 智能降级**：5级动态降级策略，温度/电量自适应
+- ** 轻量模型**：参数<3M，支持INT8量化部署
+- ** 智能降级**：5级动态降级策略，温度/电量自适应
 - **📱 跨平台支持**：支持Android/iOS，适配主流移动芯片
 
 ### 快速开始
@@ -258,11 +258,11 @@ MobileExtra/
 
 ### 开发状态
 
-- ✅ **补丁训练系统** - 完成智能检测功能
-- ✅ **超安全内存管理** - 稳定训练与自动优化
-- ✅ **残差运动矢量引导网络** - 选择性修复架构
-- ✅ **多组件损失函数** - VGG感知+边缘+边界损失
-- ✅ **统一数据处理** - NoiseBase数据集支持与预处理
+-  **补丁训练系统** - 完成智能检测功能
+-  **超安全内存管理** - 稳定训练与自动优化
+-  **残差运动矢量引导网络** - 选择性修复架构
+-  **多组件损失函数** - VGG感知+边缘+边界损失
+-  **统一数据处理** - NoiseBase数据集支持与预处理
 - 🔄 **C++核心模块** - 头文件完成，实现进行中
 - 🔄 **移动端部署** - 平台适配器就绪，集成进行中
 

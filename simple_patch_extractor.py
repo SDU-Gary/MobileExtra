@@ -78,7 +78,7 @@ class SimplePatchExtractor:
         self.total_patches = self.config.grid_rows * self.config.grid_cols
         
         if self.config.enable_debug_info:
-            print(f"🔧 SimplePatchExtractor initialized:")
+            print(f" SimplePatchExtractor initialized:")
             print(f"   Grid: {self.config.grid_rows}x{self.config.grid_cols} = {self.total_patches} patches")
             print(f"   Expected input: {self.config.expected_height}x{self.config.expected_width}")
             print(f"   Patch size: {self.config.patch_height}x{self.config.patch_width}")
@@ -102,7 +102,7 @@ class SimplePatchExtractor:
         H, W = image_data.shape[:2]
         
         if self.config.enable_debug_info:
-            print(f"📊 Processing image: {H}x{W}")
+            print(f" Processing image: {H}x{W}")
         
         # Calculate actual patch dimensions
         patch_h = H // self.config.grid_rows
@@ -146,7 +146,7 @@ class SimplePatchExtractor:
                 positions.append(position)
         
         if self.config.enable_debug_info:
-            print(f"✅ Extracted {len(patches)} patches")
+            print(f" Extracted {len(patches)} patches")
             for i, pos in enumerate(positions[:4]):  # Show first 4
                 print(f"   Patch {i}: ({pos.x}, {pos.y}) {pos.width}x{pos.height}")
             if len(positions) > 4:
@@ -201,9 +201,9 @@ class SimplePatchExtractor:
                 raise ValueError(f"Batch processing not supported, got shape {image_data.shape}")
         
         # Convert [C, H, W] to [H, W, C] if needed
-        # 🔧 FIX: 支持7通道输入 (warped RGB + holes + occlusion + motion vectors)
+        #  FIX: 支持7通道输入 (warped RGB + holes + occlusion + motion vectors)
         if len(image_data.shape) == 3 and image_data.shape[0] in [1, 3, 4, 7]:  # Support 7-channel input
-            # 🔧 FIX: 修复判断逻辑 - 7通道时[7,1080,1920]应该转换为[1080,1920,7]
+            #  FIX: 修复判断逻辑 - 7通道时[7,1080,1920]应该转换为[1080,1920,7]
             # 通道数通常 <= 7，高度和宽度通常 > 100
             if image_data.shape[0] <= 7 and image_data.shape[1] > 100 and image_data.shape[2] > 100:  # [C, H, W]
                 image_data = np.transpose(image_data, (1, 2, 0))
@@ -257,7 +257,7 @@ if __name__ == "__main__":
     
     patches, positions = extractor.extract_patches(test_image)
     
-    print(f"✅ Test completed:")
+    print(f" Test completed:")
     print(f"   Input: {test_image.shape}")
     print(f"   Patches extracted: {len(patches)}")
     print(f"   Patch sizes: {[p.shape for p in patches[:3]]}...")  # Show first 3
@@ -270,4 +270,4 @@ if __name__ == "__main__":
     info = extractor.get_patch_info()
     print(f"   Info: {info}")
     
-    print("✅ SimplePatchExtractor ready for training!")
+    print(" SimplePatchExtractor ready for training!")

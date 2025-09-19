@@ -31,7 +31,7 @@ class DataAlignmentVerifier:
         if len(self.data_files) == 0:
             raise ValueError(f"没有找到数据文件: {self.training_dir}")
         
-        print(f"✅ 找到 {len(self.data_files)} 个数据文件")
+        print(f" 找到 {len(self.data_files)} 个数据文件")
     
     def load_sample(self, idx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -180,7 +180,7 @@ class DataAlignmentVerifier:
         if sample_count > len(self.data_files):
             sample_count = len(self.data_files)
         
-        print(f"🔍 验证 {sample_count} 个样本的数据对齐质量...")
+        print(f" 验证 {sample_count} 个样本的数据对齐质量...")
         
         all_metrics = []
         
@@ -276,7 +276,7 @@ class DataAlignmentVerifier:
         
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"📊 可视化结果保存至: {save_path}")
+            print(f" 可视化结果保存至: {save_path}")
         
         plt.show()
         
@@ -285,14 +285,14 @@ class DataAlignmentVerifier:
 
 def main():
     """主函数"""
-    print("🔍 数据对齐验证开始")
+    print(" 数据对齐验证开始")
     
     try:
         # 创建验证器
         verifier = DataAlignmentVerifier("./output_motion_fix")
         
         # 验证批量样本
-        print("\n📊 批量验证结果:")
+        print("\n 批量验证结果:")
         summary = verifier.verify_batch(sample_count=20)
         
         print("\n📈 统计摘要:")
@@ -300,7 +300,7 @@ def main():
             print(f"  {key}: {value:.6f}")
         
         # 评估对齐质量
-        print("\n🎯 对齐质量评估:")
+        print("\n 对齐质量评估:")
         ssim_mean = summary.get('overall_ssim_mean', 0)
         non_hole_mae = summary.get('non_hole_mae_mean', float('inf'))
         hole_mae = summary.get('hole_mae_mean', 0)
@@ -313,7 +313,7 @@ def main():
         print("\n🖼️ 生成可视化示例...")
         verifier.visualize_alignment(0, "./data_alignment_verification.png")
         
-        print("\n✅ 数据对齐验证完成")
+        print("\n 数据对齐验证完成")
         
         # 返回是否通过验证
         is_good_alignment = (ssim_mean > 0.6 and non_hole_mae < 0.1)
