@@ -15,14 +15,14 @@ Compatible with existing FrameInterpolationTrainer architecture.
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import pytorch_lightning as pl
-import torchvision.transforms as transforms
 import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Any, Optional, Tuple, List, Union
 import logging
 from dataclasses import dataclass
+from torch.nn.functional import smooth_l1_loss
 
 # Import existing components
 try:
@@ -32,24 +32,146 @@ try:
     )
 except ImportError as e:
     print(f"Training framework import warning: {e}")
-    # Provide basic loss function placeholders
     class PerceptualLoss(nn.Module):
+        """🔧 UPGRADED: 真正的VGG感知损失实现"""
         def __init__(self):
             super().__init__()
+            
+            # 尝试加载VGG16进行感知损失计算
+            try:
+                import torchvision.models as models
+                # 加载预训练VGG16
+                vgg = models.vgg16(pretrained=True)
+                self.vgg_features = vgg.features[:30]  # 到relu5_3
+                
+                # 冻结VGG参数
+                for param in self.vgg_features.parameters():
+                    param.requires_grad = False
+                    
+                # ImageNet标准化参数
+                self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+                self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+                
+                # 特征提取层索引
+                self.feature_layers = [3, 8, 15, 22, 29]
+                self.use_vgg = True
+                
+                print(" VGG感知损失初始化成功")
+                
+            except Exception as e:
+                print(f" VGG感知损失初始化失败，使用SSIM替代: {e}")
+                self.use_vgg = False
+                # SSIM窗口
+                self.register_buffer('ssim_window', self._create_ssim_window(11, 3))
+                
+        def _create_ssim_window(self, window_size: int, channel: int) -> torch.Tensor:
+            """创建SSIM高斯窗口"""
+            import numpy as np
+            sigma = 1.5
+            gauss = torch.Tensor([
+                np.exp(-(x - window_size//2)**2/float(2*sigma**2)) 
+                for x in range(window_size)
+            ])
+            gauss = gauss / gauss.sum()
+            
+            _1D_window = gauss.unsqueeze(1)
+            _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+            
+            window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+            return window
+            
+        def _normalize_for_vgg(self, x: torch.Tensor) -> torch.Tensor:
+            """标准化输入到VGG范围"""
+            # 假设输入是[-1, 1] 或 [0, 1] 范围
+            if x.min() < 0:
+                x = (x + 1.0) / 2.0  # [-1,1] -> [0,1]
+            
+            # ImageNet标准化
+            return (x - self.mean) / self.std
+            
+        def _extract_vgg_features(self, x: torch.Tensor) -> list:
+            """提取VGG特征"""
+            x = self._normalize_for_vgg(x)
+            features = []
+            
+            for i, layer in enumerate(self.vgg_features):
+                x = layer(x)
+                if i in self.feature_layers:
+                    features.append(x)
+                    
+            return features
+            
+        def _compute_ssim(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+            """计算SSIM作为VGG的替代"""
+            window = self.ssim_window.to(pred.device)
+            
+            # 计算均值
+            mu1 = F.conv2d(pred, window, padding=5, groups=3)
+            mu2 = F.conv2d(target, window, padding=5, groups=3)
+            
+            mu1_sq = mu1.pow(2)
+            mu2_sq = mu2.pow(2)
+            mu1_mu2 = mu1 * mu2
+            
+            # 方差和协方差
+            sigma1_sq = F.conv2d(pred * pred, window, padding=5, groups=3) - mu1_sq
+            sigma2_sq = F.conv2d(target * target, window, padding=5, groups=3) - mu2_sq
+            sigma12 = F.conv2d(pred * target, window, padding=5, groups=3) - mu1_mu2
+            
+            # SSIM计算
+            C1 = 0.01**2
+            C2 = 0.03**2
+            
+            ssim = ((2*mu1_mu2 + C1)*(2*sigma12 + C2)) / ((mu1_sq + mu2_sq + C1)*(sigma1_sq + sigma2_sq + C2))
+            
+            return 1 - ssim.mean()  # 转换为损失 (越小越好)
+        
         def forward(self, pred, target):
-            return torch.tensor(0.0)
+            """感知损失计算"""
+            if not self.use_vgg:
+                # 使用SSIM作为替代
+                return self._compute_ssim(pred, target)
+            
+            try:
+                # VGG感知损失
+                pred_features = self._extract_vgg_features(pred)
+                target_features = self._extract_vgg_features(target)
+                
+                perceptual_loss = 0.0
+                layer_weights = [1.5, 1.5, 2.0, 2.0, 1.5]  # 每层权重
+                
+                for i, (pred_feat, target_feat) in enumerate(zip(pred_features, target_features)):
+                    if i < len(layer_weights):
+                        # 使用L1损失比较特征
+                        layer_loss = smooth_l1_loss(pred_feat, target_feat, beta=0.001)
+                        perceptual_loss += layer_weights[i] * layer_loss
+                
+                return perceptual_loss
+                
+            except Exception as e:
+                print(f" VGG感知损失计算失败，使用SSIM替代: {e}")
+                # 降级到SSIM
+                return self._compute_ssim(pred, target)
     
     class DistillationLoss(nn.Module):
         def __init__(self):
             super().__init__()
         def forward(self, student, teacher, target):
-            return torch.tensor(0.0), {}
+            # 返回零损失但不影响训练（通过requires_grad=False）
+            return torch.tensor(0.0, requires_grad=False), {}
     
     class EdgeLoss(nn.Module):
         def __init__(self):
             super().__init__()
         def forward(self, pred, target):
-            return torch.tensor(0.0)
+            # 使用简单的梯度差异作为边缘损失
+            return torch.nn.functional.l1_loss(
+                torch.diff(pred, dim=-1), 
+                torch.diff(target, dim=-1)
+            ) + torch.nn.functional.l1_loss(
+                torch.diff(pred, dim=-2), 
+                torch.diff(target, dim=-2)
+            )
     
     class FrameInterpolationTrainer:
         pass
@@ -246,8 +368,8 @@ class PatchAwareLoss(nn.Module):
             losses['patch_edge'] = patch_edge
             losses['patch_boundary'] = boundary_loss
             
-            # patch总损失 - 🔧 增强感知损失和边缘损失权重
-            patch_total = (patch_l1 + 0.8 * patch_perceptual + 
+            # patch总损失
+            patch_total = (patch_l1 + 1.2 * patch_perceptual + 
                           0.5 * patch_edge + weights['boundary'] * boundary_loss)
             total_loss += weights['patch'] * patch_total
         
@@ -263,7 +385,7 @@ class PatchAwareLoss(nn.Module):
         
         # 现在只有patch模式：early重patch，later重boundary
         patch_weight = 1.0
-        boundary_weight = 0.5 - 0.2 * progress  # 训练后期减少边界权重
+        boundary_weight = 0.7
         
         return {
             'patch': patch_weight,
@@ -274,38 +396,62 @@ class PatchAwareLoss(nn.Module):
     
     def _compute_boundary_loss(self, pred: torch.Tensor, target: torch.Tensor, 
                               patch_metadata: List[Dict]) -> torch.Tensor:
-        """计算边界感知损失"""
-        if len(patch_metadata) == 0:
+        """计算边界感知损失 - 🔧 FIXED: 自适应边界检测，不依赖metadata"""
+        batch_size = pred.shape[0]
+        
+        if batch_size == 0:
             return torch.tensor(0.0, device=pred.device)
         
-        # 简化版边界损失：在patch边界区域加权
-        boundary_loss = 0.0
+        # 🔧 NEW: 自动边界检测，不依赖外部metadata
+        total_boundary_loss = 0.0
         
-        for i, metadata in enumerate(patch_metadata):
-            if i >= pred.shape[0]:
-                break
-                
-            # 检测边界区域（简单的边缘检测）
-            if self.boundary_kernel.device != pred.device:
-                self.boundary_kernel = self.boundary_kernel.to(pred.device)
+        # 确保boundary_kernel在正确设备上
+        if self.boundary_kernel.device != pred.device:
+            self.boundary_kernel = self.boundary_kernel.to(pred.device)
+        
+        for i in range(batch_size):
+            # 对每个patch计算边界损失
+            patch_pred = pred[i:i+1]  # [1, 3, H, W]
+            patch_target = target[i:i+1]  # [1, 3, H, W]
             
-            # 对每个通道分别处理
-            patch_pred = pred[i:i+1]  # [1, 3, 128, 128]
-            patch_target = target[i:i+1]  # [1, 3, 128, 128]
+            # 🔧 NEW: 多种边界检测策略组合
+            # 1. 基于目标图像的边缘检测
+            target_gray = torch.mean(patch_target, dim=1, keepdim=True)  # [1, 1, H, W]
+            target_edges = F.conv2d(target_gray, self.boundary_kernel, padding=1)
+            target_boundary_map = torch.sigmoid(torch.abs(target_edges) * 2.0)
             
-            # 边界检测（使用灰度化后的结果）
-            pred_gray = torch.mean(patch_pred, dim=1, keepdim=True)  # [1, 1, 128, 128]
-            boundary_map = F.conv2d(pred_gray, self.boundary_kernel, padding=1)
-            boundary_map = torch.sigmoid(boundary_map * 0.1)
+            # 2. 基于预测图像的边缘检测
+            pred_gray = torch.mean(patch_pred, dim=1, keepdim=True)  # [1, 1, H, W]
+            pred_edges = F.conv2d(pred_gray, self.boundary_kernel, padding=1)
+            pred_boundary_map = torch.sigmoid(torch.abs(pred_edges) * 1.0)
             
-            # 在边界区域加权L1损失
+            # 3. 组合边界图：取两者的最大值
+            combined_boundary_map = torch.max(target_boundary_map, pred_boundary_map)
+            
+            # 4. 添加patch边缘区域（patch的四周边界）
+            H, W = patch_pred.shape[2], patch_pred.shape[3]
+            edge_margin = 8  # 边缘区域宽度
+            edge_mask = torch.zeros_like(combined_boundary_map)
+            
+            # 设置边缘区域
+            edge_mask[:, :, :edge_margin, :] = 0.5  # 顶部
+            edge_mask[:, :, -edge_margin:, :] = 0.5  # 底部
+            edge_mask[:, :, :, :edge_margin] = 0.5  # 左侧
+            edge_mask[:, :, :, -edge_margin:] = 0.5  # 右侧
+            
+            # 5. 最终边界权重图
+            final_boundary_map = torch.clamp(combined_boundary_map + edge_mask, 0.0, 2.0)
+            
+            # 6. 在边界区域加权L1损失
             boundary_weighted_loss = torch.mean(
                 F.l1_loss(patch_pred, patch_target, reduction='none') * 
-                (1.0 + boundary_map)  # 边界区域权重增强
+                (1.0 + final_boundary_map)  # 边界区域权重增强 (1.0-3.0倍)
             )
-            boundary_loss += boundary_weighted_loss
+            
+            total_boundary_loss += boundary_weighted_loss
         
-        return boundary_loss / len(patch_metadata) if patch_metadata else torch.tensor(0.0, device=pred.device)
+        # 返回平均边界损失
+        return total_boundary_loss / batch_size
     
 
 
@@ -409,7 +555,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         inpainting_config = model_config.get('inpainting_network', {})
         patch_inpainting_config = PatchInpaintingConfig(
             enable_patch_mode=self.patch_config.enable_patch_mode,
-            patch_network_channels=24  # 轻量化配置
+            patch_network_channels=24  # 🔧 REVERT: 回退到稳定的24通道配置
         )
         
         self.student_model = PatchBasedInpainting(
@@ -417,6 +563,9 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             output_channels=inpainting_config.get('output_channels', 3),
             config=patch_inpainting_config
         )
+        
+        # 🔧 NEW: 启动时输出模型配置信息
+        self._print_model_architecture_info(inpainting_config, patch_inpainting_config)
         
         # 注意：删除了fallback全图网络，现在只专注patch训练
         
@@ -438,6 +587,14 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         
         # 损失函数
         self.patch_loss = PatchAwareLoss()
+        
+        # 训练侧统一的边界检测卷积核（与损失函数一致）
+        boundary_kernel = torch.tensor([
+            [-1, -1, -1],
+            [-1,  8, -1],
+            [-1, -1, -1]
+        ], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        self.register_buffer('boundary_kernel', boundary_kernel)
         
         if self.teacher_model is not None:
             self.distillation_loss = DistillationLoss()
@@ -481,6 +638,81 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         """前向传播"""
         return self.student_model(x)
     
+    def _validate_batch_data(self, batch: Dict[str, torch.Tensor]) -> None:
+        """验证batch数据的完整性和格式"""
+        try:
+            # 检查必需的字段
+            if 'patch_input' not in batch:
+                raise ValueError("Missing 'patch_input' in batch data")
+            if 'patch_target_residual' not in batch:
+                raise ValueError("Missing 'patch_target_residual' in batch data")  
+            if 'patch_target_rgb' not in batch:
+                raise ValueError("Missing 'patch_target_rgb' in batch data")
+            
+            # 检查数据维度
+            patch_input = batch['patch_input']
+            patch_target_residual = batch['patch_target_residual']
+            patch_target_rgb = batch['patch_target_rgb']
+            
+            if patch_input.dim() != 4:
+                raise ValueError(f"patch_input should be 4D tensor, got {patch_input.dim()}D")
+            if patch_target_residual.dim() != 4:
+                raise ValueError(f"patch_target_residual should be 4D tensor, got {patch_target_residual.dim()}D")
+            if patch_target_rgb.dim() != 4:
+                raise ValueError(f"patch_target_rgb should be 4D tensor, got {patch_target_rgb.dim()}D")
+            
+            # 检查通道数
+            if patch_input.shape[1] != 7:
+                raise ValueError(f"patch_input should have 7 channels, got {patch_input.shape[1]}")
+            if patch_target_residual.shape[1] != 3:
+                raise ValueError(f"patch_target_residual should have 3 channels, got {patch_target_residual.shape[1]}")
+            if patch_target_rgb.shape[1] != 3:
+                raise ValueError(f"patch_target_rgb should have 3 channels, got {patch_target_rgb.shape[1]}")
+            
+            # 检查批次大小一致性
+            batch_size = patch_input.shape[0]
+            if patch_target_residual.shape[0] != batch_size:
+                raise ValueError(f"Batch size mismatch: input={batch_size}, target_residual={patch_target_residual.shape[0]}")
+            if patch_target_rgb.shape[0] != batch_size:
+                raise ValueError(f"Batch size mismatch: input={batch_size}, target_rgb={patch_target_rgb.shape[0]}")
+            
+            # 检查patch尺寸一致性
+            if patch_input.shape[2:] != patch_target_residual.shape[2:]:
+                raise ValueError(f"Spatial size mismatch: input={patch_input.shape[2:]}, target_residual={patch_target_residual.shape[2:]}")
+            if patch_input.shape[2:] != patch_target_rgb.shape[2:]:
+                raise ValueError(f"Spatial size mismatch: input={patch_input.shape[2:]}, target_rgb={patch_target_rgb.shape[2:]}")
+            
+            # 检查数据范围
+            if torch.isnan(patch_input).any() or torch.isinf(patch_input).any():
+                raise ValueError("patch_input contains NaN or Inf values")
+            if torch.isnan(patch_target_residual).any() or torch.isinf(patch_target_residual).any():
+                raise ValueError("patch_target_residual contains NaN or Inf values")
+            if torch.isnan(patch_target_rgb).any() or torch.isinf(patch_target_rgb).any():
+                raise ValueError("patch_target_rgb contains NaN or Inf values")
+            
+            # 检查残差学习数据一致性
+            try:
+                from residual_learning_helper import ResidualLearningHelper
+                warped_rgb = patch_input[:, :3]
+                ResidualLearningHelper.validate_residual_data(patch_input, patch_target_residual, patch_target_rgb)
+            except ImportError:
+                pass
+                
+        except Exception as e:
+            print(f"ERROR: Batch数据验证失败: {e}")
+            # 🔧 FIX: 添加类型检查，避免对list调用keys()
+            if isinstance(batch, dict):
+                print(f"Batch keys: {list(batch.keys())}")
+                if 'patch_input' in batch:
+                    print(f"patch_input shape: {batch['patch_input'].shape}")
+                if 'patch_target_residual' in batch:
+                    print(f"patch_target_residual shape: {batch['patch_target_residual'].shape}")
+                if 'patch_target_rgb' in batch:
+                    print(f"patch_target_rgb shape: {batch['patch_target_rgb'].shape}")
+            else:
+                print(f"Batch type: {type(batch)}, content: {batch}")
+            raise e
+
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         """训练步骤"""
         current_epoch = self.current_epoch
@@ -498,15 +730,41 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         predictions = {}
         targets = {}
         
-        # 处理patch数据（现在只有patch数据）
+        # 数据验证和残差学习patch数据处理
+        self._validate_batch_data(batch)
+        
         if 'patch_input' in batch and len(batch['patch_input']) > 0:
-            patch_input = batch['patch_input']    # [N, 7, 128, 128]
-            patch_target = batch['patch_target']  # [N, 3, 128, 128]
+            patch_input = batch['patch_input']                      # [N, 7, 270, 480]
+            patch_target_residual = batch['patch_target_residual']  # [N, 3, 270, 480]
+            patch_target_rgb = batch['patch_target_rgb']            # [N, 3, 270, 480]
             
-            # Patch网络推理
-            patch_pred = self.student_model.patch_network(patch_input)
-            predictions['patch'] = patch_pred
-            targets['patch'] = patch_target
+            # 训练时基于目标图像构建边界图并传入网络（与损失侧语义一致）
+            target_gray = torch.mean(patch_target_rgb, dim=1, keepdim=True)  # [N,1,H,W]
+            # 确保卷积核在同一设备
+            kernel = self.boundary_kernel
+            if kernel.device != target_gray.device:
+                kernel = kernel.to(target_gray.device)
+            target_edges = F.conv2d(target_gray, kernel, padding=1)
+            boundary_override = torch.sigmoid(torch.abs(target_edges) * 2.0)
+
+            # Patch网络推理 - 输出残差预测（传入 boundary_override）
+            residual_pred = self.student_model.patch_network(patch_input, boundary_override=boundary_override)
+            
+            # 🔧 使用统一的残差学习工具类
+            try:
+                from residual_learning_helper import ResidualLearningHelper
+            except ImportError:
+                import sys
+                sys.path.append('./train')
+                from residual_learning_helper import ResidualLearningHelper
+            
+            # 残差预测转换为完整图像用于损失计算
+            warped_rgb = patch_input[:, :3]  # 提取输入的warped RGB
+            patch_pred_full = ResidualLearningHelper.reconstruct_from_residual(warped_rgb, residual_pred)
+            
+            # 损失计算使用完整重建图像与目标RGB
+            predictions['patch'] = patch_pred_full
+            targets['patch'] = patch_target_rgb
             
             self.training_stats['patch_steps'] += 1
         else:
@@ -522,8 +780,7 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             metadata=batch.get('batch_info', {})
         )
         
-        # 注意：知识蒸馏暂时禁用，因为删除了全图模式
-        # TODO: 如需知识蒸馏，需要实现patch-level的蒸馏策略
+        # 知识蒸馏暂时禁用，因为删除了全图模式
         
         # 更新统计
         self.training_stats['recent_losses'].append(loss.item())
@@ -543,13 +800,13 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         
         if self.patch_visualizer and self.patch_visualizer.should_visualize(current_global_step):
             try:
-                # 记录patch对比（输入|目标|预测）
+                # 🔧 记录patch对比（输入|目标RGB|重建图像）- 残差学习版本
                 if 'patch' in predictions and 'patch' in targets:
                     self.patch_visualizer.log_patch_comparison(
                         step=current_global_step,
                         patch_inputs=batch['patch_input'][:8],  # 最多显示8个patches
-                        patch_targets=targets['patch'][:8],
-                        patch_predictions=predictions['patch'][:8],
+                        patch_targets=batch['patch_target_rgb'][:8],  # 使用RGB目标进行可视化
+                        patch_predictions=predictions['patch'][:8],   # 重建的完整图像
                         tag=f'training_epoch_{current_epoch}'
                     )
                 
@@ -584,11 +841,35 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         predictions = {}
         targets = {}
         
-        # 处理验证数据（与训练步骤类似，但无梯度更新）
+        # 🔧 处理残差学习验证数据
         if 'patch_input' in batch and len(batch['patch_input']) > 0:
-            patch_pred = self.student_model.patch_network(batch['patch_input'])
-            predictions['patch'] = patch_pred
-            targets['patch'] = batch['patch_target']
+            patch_input = batch['patch_input']
+            patch_target_rgb = batch['patch_target_rgb'] # 获取目标RGB用于生成boundary_override
+
+            target_gray = torch.mean(patch_target_rgb, dim=1, keepdim=True)  # [N,1,H,W]
+            # 确保卷积核在同一设备
+            kernel = self.boundary_kernel
+            if kernel.device != target_gray.device:
+                kernel = kernel.to(target_gray.device)
+            target_edges = F.conv2d(target_gray, kernel, padding=1)
+            boundary_override = torch.sigmoid(torch.abs(target_edges) * 2.0) 
+            
+            # 网络输出残差预测
+            residual_pred = self.student_model.patch_network(batch['patch_input'], boundary_override=boundary_override)
+            
+            # 使用统一的残差学习工具类转换为完整图像
+            try:
+                from residual_learning_helper import ResidualLearningHelper
+            except ImportError:
+                import sys
+                sys.path.append('./train')
+                from residual_learning_helper import ResidualLearningHelper
+            
+            warped_rgb = batch['patch_input'][:, :3]
+            patch_pred_full = ResidualLearningHelper.reconstruct_from_residual(warped_rgb, residual_pred)
+            
+            predictions['patch'] = patch_pred_full
+            targets['patch'] = batch['patch_target_rgb']  # 使用RGB目标
         
         # 现在只有patch模式
         mode = 'patch'
@@ -609,12 +890,13 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         
         if self.patch_visualizer and self.current_epoch % 5 == 0:  # 每5个epoch记录验证图像
             try:
+                # 🔧 验证可视化 - 残差学习版本
                 if 'patch' in predictions and 'patch' in targets:
                     self.patch_visualizer.log_patch_comparison(
                         step=current_global_step,
                         patch_inputs=batch['patch_input'][:4],  # 验证时显示4个patches
-                        patch_targets=targets['patch'][:4],
-                        patch_predictions=predictions['patch'][:4],
+                        patch_targets=batch['patch_target_rgb'][:4],  # 使用RGB目标
+                        patch_predictions=predictions['patch'][:4],   # 重建图像
                         tag=f'validation_epoch_{self.current_epoch}'
                     )
                 
@@ -636,21 +918,34 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
     
     def configure_optimizers(self) -> Dict[str, Any]:
         """配置优化器和学习率调度器"""
-        # 优化器配置
+        # 优化器配置 - 确保类型转换
         optimizer_config = self.training_config.get('optimizer', {})
+        
+        # 安全的类型转换
+        learning_rate = float(optimizer_config.get('learning_rate', 1e-4))
+        weight_decay = float(optimizer_config.get('weight_decay', 1e-5))
+        
+        print(f"📊 优化器配置: lr={learning_rate}, weight_decay={weight_decay}")
+        
         optimizer = optim.AdamW(
             self.student_model.parameters(),
-            lr=optimizer_config.get('learning_rate', 1e-4),
-            weight_decay=optimizer_config.get('weight_decay', 1e-5),
+            lr=learning_rate,
+            weight_decay=weight_decay,
             betas=(0.9, 0.999)
         )
         
-        # 学习率调度器
+        # 学习率调度器 - 确保类型转换
         scheduler_config = self.training_config.get('scheduler', {})
+        
+        T_max = int(scheduler_config.get('T_max', 100))
+        eta_min = float(scheduler_config.get('eta_min', 1e-6))
+        
+        print(f"📊 调度器配置: T_max={T_max}, eta_min={eta_min}")
+        
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=scheduler_config.get('T_max', 100),
-            eta_min=scheduler_config.get('eta_min', 1e-6)
+            T_max=T_max,
+            eta_min=eta_min
         )
         
         return {
@@ -715,6 +1010,73 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             'cache_hit_rate': 0.0,  # 占位符，实际需要从数据集获取
             'processing_speed': 100.0  # 占位符
         }
+    
+    def _print_model_architecture_info(self, inpainting_config: Dict[str, Any], patch_inpainting_config) -> None:
+        """🔧 NEW: 启动时输出模型架构信息，便于验证配置正确性"""
+        print("\n" + "="*70)
+        print("🏗️  模型架构配置信息")
+        print("="*70)
+        
+        # 基础网络配置
+        input_channels = inpainting_config.get('input_channels', 7)
+        output_channels = inpainting_config.get('output_channels', 3)
+        base_channels = inpainting_config.get('base_channels', 64)
+        patch_network_channels = patch_inpainting_config.patch_network_channels
+        
+        print(f"📊 网络类型: PatchBasedInpainting (patch训练框架)")
+        print(f"📊 输入通道数: {input_channels}")
+        print(f"📊 输出通道数: {output_channels}")
+        print(f"📊 配置文件base_channels: {base_channels}")
+        print(f"📊 实际patch_network_channels: {patch_network_channels}")
+        
+        # 验证配置一致性
+        if base_channels == patch_network_channels:
+            print(f"✅ 配置一致性检查: 通过 (base_channels = patch_network_channels = {base_channels})")
+        else:
+            print(f"⚠️  配置不一致: base_channels={base_channels}, patch_network_channels={patch_network_channels}")
+        
+        # 输出具体的PatchNetwork信息
+        if hasattr(self.student_model, 'patch_network'):
+            patch_network = self.student_model.patch_network
+            total_params = sum(p.numel() for p in patch_network.parameters())
+            trainable_params = sum(p.numel() for p in patch_network.parameters() if p.requires_grad)
+            
+            print(f"📊 PatchNetwork参数统计:")
+            print(f"   - 总参数量: {total_params:,}")
+            print(f"   - 可训练参数: {trainable_params:,}")
+            print(f"   - 参数大小: {total_params * 4 / 1024 / 1024:.2f} MB")
+            
+            # 如果可以访问网络结构，显示通道配置
+            if hasattr(patch_network, 'ch1'):
+                print(f"📊 Enhanced PatchNetwork通道架构:")
+                print(f"   - ch1 (Level 1): {patch_network.ch1}")
+                print(f"   - ch2 (Level 2): {patch_network.ch2}")
+                print(f"   - ch3 (Level 3): {patch_network.ch3}")
+                print(f"   - ch4 (Level 4): {patch_network.ch4}")
+                print(f"   - ch5 (Bottleneck): {patch_network.ch5}")
+        
+        # 训练模式配置
+        learning_mode = inpainting_config.get('learning_mode', 'residual')
+        print(f"📊 学习模式: {learning_mode}")
+        
+        # Patch配置信息
+        if hasattr(self, 'patch_config'):
+            print(f"📊 Patch配置:")
+            print(f"   - Patch模式: {'启用' if self.patch_config.enable_patch_mode else '禁用'}")
+            if hasattr(self.patch_config, 'patch_size'):
+                print(f"   - Patch大小: {self.patch_config.patch_size}x{self.patch_config.patch_size}")
+        
+        print("="*70 + "\n")
+        
+        # 如果发现配置问题，给出警告
+        if base_channels != 64:
+            print("⚠️  警告: base_channels不是64，可能与预期配置不符")
+        if patch_network_channels != 64:
+            print("⚠️  警告: patch_network_channels不是64，训练的模型将无法与64通道推理脚本兼容")
+        if base_channels != patch_network_channels:
+            print("⚠️  警告: base_channels与patch_network_channels不一致，请检查配置")
+        
+        print("💡 提示: 如果要与现有推理脚本兼容，确保两个通道数都是64")
 
 
 def create_patch_trainer(model_config: Dict[str, Any],
@@ -789,7 +1151,438 @@ def test_patch_training_framework():
         return False
 
 
+def main():
+    """主训练函数 - 支持配置文件训练"""
+    import argparse
+    import yaml
+    
+    parser = argparse.ArgumentParser(description="Patch Training Framework")
+    parser.add_argument('--config', type=str, required=True, 
+                       help='Configuration file path')
+    parser.add_argument('--test-only', action='store_true',
+                       help='Run test only without training')
+    
+    args = parser.parse_args()
+    
+    if args.test_only:
+        # 运行测试模式
+        success = test_patch_training_framework()
+        print(f"\n{'SUCCESS: Patch training framework test passed!' if success else 'ERROR: Patch training framework test failed!'}")
+        return 0 if success else 1
+    
+    # 训练模式 - 加载配置文件
+    try:
+        print(f"📄 加载配置文件: {args.config}")
+        
+        if not os.path.exists(args.config):
+            print(f" 配置文件不存在: {args.config}")
+            return 1
+        
+        with open(args.config, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        
+        if config is None:
+            print(" 配置文件为空或格式错误")
+            return 1
+        
+        print(" 配置文件加载成功")
+        
+        # 启动实际训练
+        success = run_patch_training(config)
+        return 0 if success else 1
+        
+    except Exception as e:
+        print(f" 训练失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def run_patch_training(config: Dict[str, Any]) -> bool:
+    """运行Patch训练流程"""
+    try:
+        print("🚀 启动Patch训练流程...")
+        
+        # 提取配置sections
+        network_config = config.get('network', {})
+        training_config = config.get('training', {})
+        patch_config_dict = config.get('patch', {})
+        data_config = config.get('data', {})
+        loss_config = config.get('loss', {})
+        monitoring_config = config.get('monitoring', {})
+        
+        print(f"📊 网络配置: {network_config.get('type', 'Unknown')}")
+        print(f"📊 训练批次: {training_config.get('batch_size', 'Unknown')}")
+        print(f"📊 Patch模式: {'启用' if patch_config_dict.get('enable_patch_mode', False) else '禁用'}")
+        print(f"📊 简单网格: {'启用' if patch_config_dict.get('use_simple_grid_patches', False) else '禁用'}")
+        
+        # 创建训练器配置
+        model_config = {
+            'inpainting_network': {
+                'input_channels': network_config.get('input_channels', 7),
+                'output_channels': network_config.get('output_channels', 3),
+                'base_channels': network_config.get('base_channels', 24)  # 🔧 REVERT: 回退到稳定的24通道
+            }
+        }
+        
+        trainer_config = {
+            'optimizer': {
+                'learning_rate': training_config.get('learning_rate', 1e-4),
+                'weight_decay': training_config.get('weight_decay', 1e-5)
+            },
+            'scheduler': {
+                'T_max': training_config.get('max_epochs', 100),
+                'eta_min': 1e-6
+            },
+            'log_dir': monitoring_config.get('tensorboard_log_dir', './logs/patch_training'),
+            'batch_size': training_config.get('batch_size', 4),
+            'max_epochs': training_config.get('max_epochs', 100)
+        }
+        
+        # 创建Patch配置
+        from patch_aware_dataset import PatchTrainingConfig
+        
+        patch_training_config = PatchTrainingConfig(
+            enable_patch_mode=patch_config_dict.get('enable_patch_mode', True),
+            patch_size=patch_config_dict.get('patch_size', 128),
+            use_simple_grid_patches=patch_config_dict.get('use_simple_grid_patches', False),
+            use_optimized_patches=patch_config_dict.get('use_optimized_patches', True),
+            simple_grid_rows=patch_config_dict.get('simple_grid_rows', 4),
+            simple_grid_cols=patch_config_dict.get('simple_grid_cols', 4),
+            simple_expected_height=patch_config_dict.get('simple_expected_height', 1080),
+            simple_expected_width=patch_config_dict.get('simple_expected_width', 1920),
+            min_patches_per_image=patch_config_dict.get('min_patches_per_image', 8),
+            max_patches_per_image=patch_config_dict.get('max_patches_per_image', 16)
+        )
+        
+        # 创建训练器
+        trainer = create_patch_trainer(
+            model_config=model_config,
+            training_config=trainer_config,
+            patch_config=patch_training_config,
+            full_config=config
+        )
+        
+        print(" Patch训练器创建成功")
+        print(f"📊 网络参数: {sum(p.numel() for p in trainer.student_model.parameters()):,}")
+        
+        # 创建数据加载器
+        success = setup_data_loaders(trainer, data_config, patch_training_config)
+        if not success:
+            print(" 数据加载器设置失败")
+            return False
+        
+        # 开始训练
+        print("🎯 开始训练循环...")
+        
+        # 创建PyTorch Lightning Trainer
+        max_epochs = trainer_config.get('max_epochs', 100)
+        
+        import pytorch_lightning as pl
+        from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+        from pytorch_lightning.loggers import TensorBoardLogger
+        
+        # 创建回调
+        callbacks = []
+        
+        # 模型检查点
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=monitoring_config.get('model_save_dir', './models/colleague'),
+            filename='patch-model-{epoch:02d}-{val_loss:.2f}',
+            monitor='val_loss',
+            save_top_k=3,
+            mode='min',
+            save_last=True
+        )
+        callbacks.append(checkpoint_callback)
+        
+        # 早停
+        early_stop_callback = EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            mode='min',
+            verbose=True
+        )
+        # callbacks.append(early_stop_callback)
+        
+        # TensorBoard日志记录器
+        tb_logger = TensorBoardLogger(
+            save_dir=monitoring_config.get('tensorboard_log_dir', './logs/colleague_training'),
+            name='patch_training'
+        )
+        
+        # 创建Lightning Trainer
+        pl_trainer = pl.Trainer(
+            max_epochs=max_epochs,
+            logger=tb_logger,
+            callbacks=callbacks,
+            accelerator='auto',  # 自动检测GPU/CPU
+            devices='auto',      # 自动检测设备数量
+            precision=32,        # 使用FP32精度
+            log_every_n_steps=10,
+            check_val_every_n_epoch=1,
+            gradient_clip_val=1.0,
+            enable_progress_bar=True,
+            enable_model_summary=True
+        )
+        
+        print(f"📊 Lightning Trainer配置:")
+        print(f"   最大轮数: {max_epochs}")
+        print(f"   设备: {pl_trainer.accelerator} ({pl_trainer.num_devices})")
+        print(f"   日志目录: {monitoring_config.get('tensorboard_log_dir', './logs/colleague_training')}")
+        print(f"   模型保存: {monitoring_config.get('model_save_dir', './models/colleague')}")
+        
+        # 启动训练
+        print("🚀 启动PyTorch Lightning训练...")
+        pl_trainer.fit(
+            model=trainer,
+            train_dataloaders=trainer.train_loader,
+            val_dataloaders=trainer.val_loader
+        )
+        
+        print(" 训练完成!")
+        return True
+        
+    except Exception as e:
+        print(f" 训练过程失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+class ColleaguePatchDataset(Dataset):
+    """ColleagueDatasetAdapter的Patch包装器"""
+    
+    def __init__(self, data_root: str, split: str, patch_config):
+        from colleague_dataset_adapter import ColleagueDatasetAdapter
+        
+        # 创建基础数据集
+        self.base_dataset = ColleagueDatasetAdapter(
+            data_root=data_root,
+            split=split,
+            augmentation=False
+        )
+        
+        self.patch_config = patch_config
+        
+        # 初始化简单网格提取器
+        if patch_config.use_simple_grid_patches:
+            print("🎯 初始化SimplePatchExtractor")
+            
+            try:
+                # 导入并创建SimplePatchExtractor
+                import sys
+                import os
+                sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+                
+                from simple_patch_extractor import SimplePatchExtractor, SimpleGridConfig
+                
+                simple_config = SimpleGridConfig(
+                    grid_rows=patch_config.simple_grid_rows,
+                    grid_cols=patch_config.simple_grid_cols,
+                    expected_height=patch_config.simple_expected_height,
+                    expected_width=patch_config.simple_expected_width,
+                    enable_debug_info=False
+                )
+                
+                self.patch_extractor = SimplePatchExtractor(simple_config)
+                self._using_simple_grid = True
+                
+                print(f"    网格配置: {patch_config.simple_grid_rows}x{patch_config.simple_grid_cols} = {patch_config.simple_grid_rows * patch_config.simple_grid_cols} patches")
+                
+            except ImportError as e:
+                print(f" SimplePatchExtractor导入失败: {e}")
+                raise
+        else:
+            raise NotImplementedError("只支持简单网格策略")
+    
+    def __len__(self):
+        # 每个图像产生固定数量的patch
+        return len(self.base_dataset) * self.patch_config.max_patches_per_image
+    
+    def __getitem__(self, idx):
+        # 计算源图像索引和patch索引
+        patches_per_image = self.patch_config.max_patches_per_image
+        image_idx = idx // patches_per_image
+        patch_idx = idx % patches_per_image
+        
+        try:
+            # 获取源图像数据 - 这应该返回 [C, H, W] 格式的张量
+            input_tensor, target_residual, target_rgb = self.base_dataset[image_idx]
+            
+            # 确保数据格式为 [C, H, W]
+            if input_tensor.shape != (7, 1080, 1920):
+                print(f"  输入数据形状异常: {input_tensor.shape}, 期望: (7, 1080, 1920)")
+                # 尝试修复形状
+                if len(input_tensor.shape) == 3:
+                    if input_tensor.shape[0] == 7:  # [C, H, W] 但H和W不对
+                        # 转置或者其他处理
+                        pass
+                    elif input_tensor.shape[2] == 7:  # [H, W, C]
+                        input_tensor = input_tensor.permute(2, 0, 1)
+                    elif input_tensor.shape[1] == 7:  # [H, C, W] - 不太可能
+                        input_tensor = input_tensor.permute(1, 0, 2)
+            
+            # 确保目标数据也是正确格式
+            if target_residual.shape[0] != 3:
+                if len(target_residual.shape) == 3 and target_residual.shape[2] == 3:
+                    target_residual = target_residual.permute(2, 0, 1)
+            
+            if target_rgb.shape[0] != 3:
+                if len(target_rgb.shape) == 3 and target_rgb.shape[2] == 3:
+                    target_rgb = target_rgb.permute(2, 0, 1)
+            
+            # 转换为numpy用于patch提取 - 注意：SimpleGridExtractor可能期望[H, W, C]格式
+            # 先尝试传递[C, H, W]格式，如果出错再调整
+            input_numpy = input_tensor.numpy()  # [7, 1080, 1920]
+            target_residual_numpy = target_residual.numpy()  # [3, 1080, 1920]
+            target_rgb_numpy = target_rgb.numpy()  # [3, 1080, 1920]
+            
+            # 检查SimplePatchExtractor期望的格式
+            # 如果出现"Size mismatch"，说明extractor期望[H, W, C]格式
+            try:
+                # 尝试使用[C, H, W]格式
+                input_patches, positions = self.patch_extractor.extract_patches(input_numpy)
+            except Exception as shape_error:
+                if "Size mismatch" in str(shape_error):
+                    # 转换为[H, W, C]格式
+                    if idx < 3:
+                        print(f"[DEBUG] 转换数据格式: {input_numpy.shape} -> [H, W, C]")
+                    input_numpy = input_numpy.transpose(1, 2, 0)  # [7, 1080, 1920] -> [1080, 1920, 7]
+                    target_residual_numpy = target_residual_numpy.transpose(1, 2, 0)  # [3, 1080, 1920] -> [1080, 1920, 3]
+                    target_rgb_numpy = target_rgb_numpy.transpose(1, 2, 0)  # [3, 1080, 1920] -> [1080, 1920, 3]
+                    
+                    # 重新尝试提取patches
+                    input_patches, positions = self.patch_extractor.extract_patches(input_numpy)
+                else:
+                    raise shape_error
+            
+            # 提取目标patches
+            target_residual_patches, _ = self.patch_extractor.extract_patches(target_residual_numpy)
+            target_rgb_patches, _ = self.patch_extractor.extract_patches(target_rgb_numpy)
+            
+            # 检查patch数量
+            if patch_idx >= len(input_patches):
+                patch_idx = len(input_patches) - 1
+            
+            # 获取指定的patch
+            patch_input = input_patches[patch_idx]  # numpy array
+            patch_target_residual = target_residual_patches[patch_idx]  # numpy array  
+            patch_target_rgb = target_rgb_patches[patch_idx]  # numpy array
+            
+            # 确保patch格式为[C, H, W]
+            if len(patch_input.shape) == 3:
+                if patch_input.shape[2] == 7:  # [H, W, C] -> [C, H, W]
+                    patch_input = patch_input.transpose(2, 0, 1)
+                if patch_target_residual.shape[2] == 3:  # [H, W, C] -> [C, H, W]
+                    patch_target_residual = patch_target_residual.transpose(2, 0, 1)
+                if patch_target_rgb.shape[2] == 3:  # [H, W, C] -> [C, H, W]
+                    patch_target_rgb = patch_target_rgb.transpose(2, 0, 1)
+            
+            # 转换为PyTorch张量
+            patch_input = torch.from_numpy(patch_input).float()
+            patch_target_residual = torch.from_numpy(patch_target_residual).float()
+            patch_target_rgb = torch.from_numpy(patch_target_rgb).float()
+            
+            # 🔧 UPDATED: 形状验证更新为支持非正方形patch (270x480)
+            expected_h, expected_w = 270, 480  # 4x4网格切分后的patch尺寸
+            assert patch_input.shape[0] == 7, f"输入patch通道数错误: {patch_input.shape[0]} (期望7)"
+            assert patch_input.shape[1:] == (expected_h, expected_w), f"输入patch尺寸错误: {patch_input.shape[1:]} (期望{expected_h}x{expected_w})"
+            assert patch_target_residual.shape[0] == 3, f"残差目标patch通道数错误: {patch_target_residual.shape[0]} (期望3)"
+            assert patch_target_residual.shape[1:] == (expected_h, expected_w), f"残差目标patch尺寸错误: {patch_target_residual.shape[1:]} (期望{expected_h}x{expected_w})"
+            assert patch_target_rgb.shape[0] == 3, f"RGB目标patch通道数错误: {patch_target_rgb.shape[0]} (期望3)"
+            assert patch_target_rgb.shape[1:] == (expected_h, expected_w), f"RGB目标patch尺寸错误: {patch_target_rgb.shape[1:]} (期望{expected_h}x{expected_w})"
+            
+            # 🔧 FIX: 返回字典格式而不是tuple，符合PyTorch Lightning期望
+            return {
+                'patch_input': patch_input,
+                'patch_target_residual': patch_target_residual,
+                'patch_target_rgb': patch_target_rgb
+            }
+            
+        except Exception as e:
+            print(f" ColleaguePatchDataset获取数据失败 [idx={idx}, image_idx={image_idx}, patch_idx={patch_idx}]: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # 🔧 FIX: 返回字典格式的零张量 (270x480尺寸)
+            expected_h, expected_w = 270, 480  # 4x4网格切分后的patch尺寸
+            return {
+                'patch_input': torch.zeros(7, expected_h, expected_w),
+                'patch_target_residual': torch.zeros(3, expected_h, expected_w),
+                'patch_target_rgb': torch.zeros(3, expected_h, expected_w)
+            }
+
+
+def setup_data_loaders(trainer, data_config: Dict[str, Any], patch_config) -> bool:
+    """设置数据加载器"""
+    try:
+        print("📊 设置数据加载器...")
+        
+        # 根据dataset_type选择数据集
+        dataset_type = data_config.get('dataset_type', 'colleague')
+        
+        if dataset_type == 'colleague':
+            # 使用ColleagueDatasetAdapter的patch包装器
+            from colleague_dataset_adapter import ColleagueDatasetAdapter
+            
+            print("🔧 使用ColleagueDatasetAdapter + ColleaguePatchDataset")
+            
+            # 创建ColleaguePatchDataset包装器
+            train_dataset = ColleaguePatchDataset(
+                data_root=data_config.get('data_root', './data'),
+                split='train',
+                patch_config=patch_config
+            )
+            
+            val_dataset = ColleaguePatchDataset(
+                data_root=data_config.get('data_root', './data'),
+                split='val',
+                patch_config=patch_config
+            )
+            
+            print(f"📊 训练样本: {len(train_dataset)} patches")
+            print(f"📊 验证样本: {len(val_dataset)} patches")
+            
+        else:
+            print(f" 不支持的数据集类型: {dataset_type}")
+            return False
+        
+        # 创建数据加载器 - 从正确的配置位置获取参数
+        training_section = trainer.training_config if hasattr(trainer, 'training_config') else {}
+        batch_size = training_section.get('batch_size', 4)
+        num_workers = 2  # 固定为2，避免多进程问题
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=True
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=False
+        )
+        
+        # 设置训练器的数据加载器
+        trainer.train_loader = train_loader
+        trainer.val_loader = val_loader
+        
+        print(" 数据加载器设置完成")
+        return True
+        
+    except Exception as e:
+        print(f" 数据加载器设置失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 if __name__ == "__main__":
-    # 运行测试
-    success = test_patch_training_framework()
-    print(f"\n{'SUCCESS: Patch training framework test passed!' if success else 'ERROR: Patch training framework test failed!'}")
+    import sys
+    exit_code = main()
+    sys.exit(exit_code)
