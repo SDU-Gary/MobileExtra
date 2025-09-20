@@ -1,12 +1,14 @@
 # MobileExtra - 移动端实时帧外插与空洞补全系统
 # Conda环境配置文件
 # 使用方法: conda env create -f environment.yml
+# 最后更新: 2025-09-20 (基于实际环境mobileExtra)
 
-name: mobile_interpolation
+name: mobileExtra
 
 channels:
-  - pytorch
-  - nvidia  
+  - https://mirrors.ustc.edu.cn/anaconda/cloud/conda-forge
+  - https://mirrors.ustc.edu.cn/anaconda/pkgs/free
+  - https://mirrors.ustc.edu.cn/anaconda/pkgs/main
   - conda-forge
   - defaults
 
@@ -14,148 +16,183 @@ dependencies:
   # ===================
   # Python基础环境
   # ===================
-  - python=3.9.*
+  - python=3.12.*
   
   # ===================
-  # 核心深度学习框架 (通过conda安装获得更好的优化)
+  # 系统基础库 (通过conda安装)
   # ===================
-  
-  # PyTorch生态系统 (CUDA 11.8)
-  - pytorch=2.1.*
-  - torchvision=0.16.*
-  - torchaudio=2.1.*
-  - pytorch-cuda=11.8
-  
-  # ===================
-  # 科学计算基础 (conda优化版本)
-  # ===================
-  
-  # NumPy (Intel MKL优化)
-  - numpy=1.24.*
-  
-  # SciPy
-  - scipy=1.11.*
+  - bzip2=1.0.8
+  - ca-certificates=2025.7.14
+  - libexpat=2.7.1
+  - libffi=3.4.6
+  - liblzma=5.8.1
+  - libsqlite=3.50.4
+  - libzlib=1.3.1
+  - openssl=3.5.1
+  - tk=8.6.13
+  - ucrt=10.0.22621.0
+  - vc=14.3
+  - vc14_runtime=14.44.35208
+  - vcomp14=14.44.35208
   
   # ===================
-  # 图像处理库 (conda版本更稳定)
+  # 包管理工具
   # ===================
-  
-  # OpenCV
-  - opencv=4.8.*
-  
-  # Pillow
-  - pillow=10.0.*
+  - pip=25.2
+  - setuptools=80.9.0
+  - wheel=0.45.1
   
   # ===================
-  # 数据存储与I/O
+  # 通过pip安装的包 (基于当前环境)
   # ===================
-  
-  # Zarr
-  - zarr=2.15.*
-  
-  # HDF5
-  - h5py=3.9.*
-  
-  # OpenEXR (conda安装避免编译问题)
-  - openexr=3.1.*
-  
-  # ImageIO
-  - imageio=2.31.*
-  
-  # ===================
-  # 可视化
-  # ===================
-  
-  # Matplotlib
-  - matplotlib=3.7.*
-  
-  # Seaborn
-  - seaborn=0.12.*
-  
-  # ===================
-  # 系统工具
-  # ===================
-  
-  # tqdm
-  - tqdm=4.65.*
-  
-  # psutil
-  - psutil=5.9.*
-  
-  # ===================
-  # 配置和文件处理
-  # ===================
-  
-  # PyYAML
-  - pyyaml=6.0.*
-  
-  # ===================
-  # Jupyter支持
-  # ===================
-  
-  - jupyter=1.0.*
-  - ipywidgets=8.1.*
-  
-  # ===================
-  # 代码质量工具
-  # ===================
-  
-  - black=23.*
-  - flake8=6.0.*
-  
-  # ===================
-  # 通过pip安装的包
-  # ===================
-  - pip=23.*
   - pip:
-    # PyTorch Lightning
-    - pytorch-lightning>=2.0.0,<2.2.0
+    # ===================
+    # 核心深度学习框架
+    # ===================
+    - torch==2.7.1  # +cu128版本，支持CUDA 12.8
+    - torchvision==0.22.1  # +cu128版本
+    - torchaudio==2.7.1  # +cu128版本
+    - pytorch-lightning==2.5.2
+    - kornia==0.8.1
+    - kornia-rs==0.1.9
     
-    # 高性能计算
-    - opencv-contrib-python>=4.8.0,<4.10.0
+    # ===================
+    # 科学计算基础
+    # ===================
+    - numpy==2.1.2
+    - scipy==1.16.1
+    - pandas==2.3.1
+    - sympy==1.13.3
+    - numba==0.61.2
+    - llvmlite==0.44.0
     
-    # 模型部署和优化
-    - onnx>=1.14.0,<1.16.0
-    - onnxruntime>=1.15.0,<1.17.0
-    - tensorflow>=2.13.0,<2.16.0
+    # ===================
+    # 图像处理库
+    # ===================
+    - opencv-python==4.12.0.88
+    - pillow==11.0.0
+    - openexr==3.3.5
     
+    # ===================
+    # 数据存储与I/O
+    # ===================
+    - zarr==3.1.1
+    - numcodecs==0.16.1
+    - h5py  # 通过依赖自动安装
+    
+    # ===================
+    # 可视化
+    # ===================
+    - matplotlib==3.10.5
+    - seaborn==0.13.2
+    - contourpy==1.3.3
+    - cycler==0.12.1
+    - fonttools==4.59.0
+    - kiwisolver==1.4.8
+    
+    # ===================
+    # 实验跟踪和监控
+    # ===================
+    - tensorboard==2.20.0
+    - tensorboard-data-server==0.7.2
+    - torch-tb-profiler==0.4.3
+    - wandb==0.21.1
+    - torchmetrics==1.8.0
+    - lightning-utilities==0.15.0
+    
+    # ===================
+    # 系统工具和性能监控
+    # ===================
+    - tqdm==4.67.1
+    - psutil==7.0.0
+    - gputil==1.4.0
+    - click==8.2.1
+    - colorama==0.4.6
+    - donfig==0.8.1.post1
+    
+    # ===================
     # 配置和参数处理
-    - ConfigArgParse>=1.5.0,<1.8.0
-    - pydantic>=1.10.0,<2.6.0
+    # ===================
+    - pyyaml==6.0.2
+    - pydantic==2.11.7
+    - pydantic-core==2.33.2
+    - jinja2==3.1.4
+    - markupsafe==2.1.5
     
-    # 性能监控
-    - memory-profiler>=0.60.0,<0.62.0
-    - rich>=13.0.0,<14.0.0
+    # ===================
+    # 网络和HTTP
+    # ===================
+    - requests==2.32.4
+    - urllib3==2.5.0
+    - certifi==2025.8.3
+    - charset-normalizer==3.4.3
+    - idna==3.10
+    - aiohttp==3.12.15
+    - aiosignal==1.4.0
+    - aiohappyeyeballs==2.6.1
+    - frozenlist==1.7.0
+    - multidict==6.6.3
+    - propcache==0.3.2
+    - yarl==1.20.1
     
-    # 实验跟踪
-    - wandb>=0.15.0,<0.17.0
-    - tensorboard>=2.13.0,<2.16.0
+    # ===================
+    # 日期和时间处理
+    # ===================
+    - python-dateutil==2.9.0.post0
+    - pytz==2025.2
+    - tzdata==2025.2
     
-    # 测试框架
-    - pytest>=7.4.0,<8.0.0
-    - pytest-cov>=4.1.0,<5.0.0
+    # ===================
+    # 数据处理和解析
+    # ===================
+    - beautifulsoup4==4.13.4
+    - soupsieve==2.7
+    - lxml==6.0.0
+    - openpyxl==3.1.5
+    - et-xmlfile==2.0.0
     
-    # 类型检查
-    - mypy>=1.5.0,<1.8.0
+    # ===================
+    # 版本控制
+    # ===================
+    - gitpython==3.1.45
+    - gitdb==4.0.12
+    - smmap==5.0.2
     
-    # 异步支持
-    - aiofiles>=23.0.0,<24.0.0
+    # ===================
+    # 机器学习相关
+    # ===================
+    - networkx==3.3
+    - fsspec==2024.6.1
+    - filelock==3.13.1
+    - packaging==25.0
+    - platformdirs==4.3.8
     
-    # 网络请求
-    - requests>=2.31.0,<2.32.0
+    # ===================
+    # Google/TensorBoard相关
+    # ===================
+    - absl-py==2.3.1
+    - grpcio==1.74.0
+    - markdown==3.8.2
+    - protobuf==6.31.1
+    - werkzeug==3.1.3
     
-    # 日期处理
-    - python-dateutil>=2.8.0,<2.10.0
+    # ===================
+    # 错误追踪
+    # ===================
+    - sentry-sdk==2.34.1
     
-    # 文档生成
-    - sphinx>=7.0.0,<8.0.0
-    - sphinx-rtd-theme>=1.3.0,<2.1.0
+    # ===================
+    # 类型相关
+    # ===================
+    - annotated-types==0.7.0
+    - typing-extensions==4.12.2
+    - typing-inspection==0.4.1
     
-    # 代码重构
-    - rope>=1.9.0,<1.12.0
-    
-    # 模型量化 (可选)
-    - neural-compressor>=2.2.0,<2.5.0
-    
-    # 平台特定依赖
-    - coremltools>=7.0.0,<7.1.0; sys_platform == "darwin"
+    # ===================
+    # 其他工具
+    # ===================
+    - attrs==25.3.0
+    - six==1.17.0
+    - pyparsing==3.2.3
+    - mpmath==1.3.0
+    - crc32c==2.7.1

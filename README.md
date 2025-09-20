@@ -132,8 +132,8 @@ MobileExtra/
 - ✅ **Lightweight Self-Attention** - O(N) complexity with ~32K parameters
 - ✅ **Enhanced VGG Loss** - True VGG16 with layer weights [0.2, 0.4, 0.8, 1.0]
 - ✅ **HDR Data Pipeline** - log1p transformation + Reinhard tone mapping
-- 🔄 **C++ Core Modules** - Headers complete, implementations in progress
-- 🔄 **Mobile Deployment** - Platform adapters ready, integration ongoing
+-  **C++ Core Modules** - Headers complete, implementations in progress
+-  **Mobile Deployment** - Platform adapters ready, integration ongoing
 
 ---
 
@@ -265,8 +265,8 @@ MobileExtra/
 - ✅ **轻量级自注意力** - O(N)复杂度，~32K参数
 - ✅ **增强VGG损失** - 真实VGG16，层权重[0.2, 0.4, 0.8, 1.0]
 - ✅ **HDR数据管道** - log1p变换 + Reinhard色调映射
-- 🔄 **C++核心模块** - 头文件完成，实现进行中
-- 🔄 **移动端部署** - 平台适配器就绪，集成进行中
+-  **C++核心模块** - 头文件完成，实现进行中
+-  **移动端部署** - 平台适配器就绪，集成进行中
 
 ## License | 许可证
 

@@ -27,8 +27,8 @@ from torch.nn.functional import smooth_l1_loss
 # Import existing components
 try:
     from training_framework import (
-        PerceptualLoss, DistillationLoss, FrameInterpolationTrainer,
-        CombinedLoss, EdgeLoss, TemporalConsistencyLoss
+        DistillationLoss, FrameInterpolationTrainer,
+        CombinedLoss, TemporalConsistencyLoss
     )
 except ImportError as e:
     print(f"Training framework import warning: {e}")
@@ -248,7 +248,7 @@ except ImportError:
                     self.config = config or {}
                     self.vis_frequency = config.get('visualization_frequency', 100) if config else 100
                     self.save_frequency = config.get('save_frequency', 500) if config else 500
-                    print(f"🔄 使用Fallback可视化器: {log_dir}")
+                    print(f" 使用Fallback可视化器: {log_dir}")
                 
                 def should_visualize(self, step):
                     return step % self.vis_frequency == 0
@@ -275,7 +275,7 @@ except ImportError:
         
         class PatchTensorBoardLogger:
             def __init__(self, *args, **kwargs):
-                print("🔄 使用Fallback TensorBoard Logger")
+                print(" 使用Fallback TensorBoard Logger")
             def log_patch_visualization(self, *args, **kwargs):
                 pass
             def log_patch_comparison(self, *args, **kwargs):

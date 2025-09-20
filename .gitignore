@@ -28,6 +28,8 @@ network.md
 detach.py
 utils.py
 
+/__pycache__/
+
 *.pdf
 
 /logs/
