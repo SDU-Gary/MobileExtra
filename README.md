@@ -126,11 +126,12 @@ MobileExtra/
 
 ### Development Status
 
--  **Patch-Based Training System** - Complete with intelligent detection
--  **Ultra-Safe Memory Management** - Stable training with automatic optimization
--  **Residual MV-Guided Network** - Selective inpainting architecture
--  **Multi-Component Loss Functions** - VGG perceptual + edge + boundary losses
--  **Unified Data Processing** - NoiseBase dataset support with preprocessing
+- ✅ **Colleague HDR Training** - OpenEXR data with 4×4 grid patches (100% stability)
+- ✅ **Simple Grid Strategy** - Deterministic 270×480 patch extraction vs complex detection
+- ✅ **Residual Learning** - SCALE_FACTOR = 1.0 with residual = target - warped
+- ✅ **Lightweight Self-Attention** - O(N) complexity with ~32K parameters
+- ✅ **Enhanced VGG Loss** - True VGG16 with layer weights [0.2, 0.4, 0.8, 1.0]
+- ✅ **HDR Data Pipeline** - log1p transformation + Reinhard tone mapping
 - 🔄 **C++ Core Modules** - Headers complete, implementations in progress
 - 🔄 **Mobile Deployment** - Platform adapters ready, integration ongoing
 
@@ -258,11 +259,12 @@ MobileExtra/
 
 ### 开发状态
 
--  **补丁训练系统** - 完成智能检测功能
--  **超安全内存管理** - 稳定训练与自动优化
--  **残差运动矢量引导网络** - 选择性修复架构
--  **多组件损失函数** - VGG感知+边缘+边界损失
--  **统一数据处理** - NoiseBase数据集支持与预处理
+- ✅ **Colleague HDR训练** - OpenEXR数据配4×4网格补丁（100%稳定性）
+- ✅ **简单网格策略** - 确定性270×480补丁提取 vs 复杂检测
+- ✅ **残差学习** - SCALE_FACTOR = 1.0，residual = target - warped
+- ✅ **轻量级自注意力** - O(N)复杂度，~32K参数
+- ✅ **增强VGG损失** - 真实VGG16，层权重[0.2, 0.4, 0.8, 1.0]
+- ✅ **HDR数据管道** - log1p变换 + Reinhard色调映射
 - 🔄 **C++核心模块** - 头文件完成，实现进行中
 - 🔄 **移动端部署** - 平台适配器就绪，集成进行中
 
