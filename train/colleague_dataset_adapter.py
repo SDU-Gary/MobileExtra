@@ -56,14 +56,39 @@ class ColleagueDatasetAdapter(Dataset):
     def __init__(self, 
                  data_root: str,
                  split: str = 'train',
-                 augmentation: bool = False):
+                 augmentation: bool = False,
+                 enable_linear_preprocessing: bool = True,
+                 enable_srgb_linear: bool = True,
+                 scale_factor: float = 0.70,
+                 tone_mapping_for_display: str = 'reinhard',
+                 gamma: float = 2.2,
+                 exposure: float = 1.0,
+                 adaptive_exposure: Optional[dict] = None):
         """初始化适配器
-        
         Args:
             data_root: 数据根目录 (包含 processed_bistro)
             split: 数据分割 ('train', 'val', 'test')
             augmentation: 是否启用数据增强 (暂不支持)
         """
+
+        # HDR处理配置（与Plan一致）
+        self.enable_linear_preprocessing = enable_linear_preprocessing
+        self.enable_srgb_linear = enable_srgb_linear
+        self.scale_factor = float(scale_factor)
+        self.tone_mapping_for_display = tone_mapping_for_display
+        self.gamma = float(gamma)
+        self.exposure = float(exposure)
+        self.adaptive_exposure = adaptive_exposure or {'enable': False}
+
+        # Kornia可用性标记（不在实例上保存模块对象以避免多进程pickle问题）
+        try:
+            import kornia.color  # noqa: F401
+            self._kornia_available = True
+        except Exception:
+            self._kornia_available = False
+            if self.enable_srgb_linear:
+                print("[INFO] Kornia not available, skip sRGB→Linear conversion")
+        
         self.data_root = Path(data_root)
         self.split = split
         self.augmentation = augmentation
@@ -375,9 +400,13 @@ class ColleagueDatasetAdapter(Dataset):
             input_tensor[4:5] = torch.zeros(1, H, W)  # [4:5] placeholder occlusion (全零填充)
             input_tensor[5:7] = torch.zeros(2, H, W)  # [5:7] placeholder residual_mv (全零填充)
             
-            # 数据归一化: HDR -> [-1, 1] (匹配网络Tanh输出)
-            input_tensor = self._normalize_to_tanh_range(input_tensor)
-            target_rgb = self._normalize_to_tanh_range(ref_data)
+            # 数据预处理：线性HDR或旧log1p路径（由开关控制）
+            if self.enable_linear_preprocessing:
+                input_tensor = self._linear_hdr_preprocessing(input_tensor)
+                target_rgb = self._linear_hdr_preprocessing(ref_data)
+            else:
+                input_tensor = self._normalize_to_tanh_range(input_tensor)
+                target_rgb = self._normalize_to_tanh_range(ref_data)
             
             # 使用统一的残差学习工具类计算残差目标
             try:
@@ -454,36 +483,87 @@ class ColleagueDatasetAdapter(Dataset):
         
         return normalized
     
-    def denormalize_for_display(self, normalized_tensor: torch.Tensor) -> torch.Tensor:
-        """反归一化用于TensorBoard显示 - 与unified_dataset.py保持一致"""
-        
-        # 只处理RGB通道（前3通道）
-        if normalized_tensor.shape[0] >= 3:
-            rgb_normalized = normalized_tensor[:3] if normalized_tensor.shape[0] > 3 else normalized_tensor
-            
-            # 反归一化: 严格对应log1p归一化的逆过程
-            # Step 1: [-1, 1] -> [0, 1]
-            rgb_01 = (rgb_normalized + 1.0) / 2.0
-            
-            # Step 2: [0, 1] -> log空间 [0, 5.024]
-            log_min_val = 0.0
-            log_max_val = 5.023574285781275  # 与归一化参数保持严格一致
-            log_values = rgb_01 * (log_max_val - log_min_val) + log_min_val
-            
-            # Step 3: log空间 -> HDR空间 (使用expm1作为log1p的逆运算)
-            hdr_rgb = torch.expm1(log_values)  # expm1(x) = exp(x) - 1
-            
-            # Step 4: HDR -> LDR tone mapping 用于显示
-            # 使用Reinhard tone mapping
-            ldr_rgb = hdr_rgb / (1.0 + hdr_rgb)
-            
-            # 确保在[0, 1]范围内
-            display_rgb = torch.clamp(ldr_rgb, 0.0, 1.0)
-            
-            return display_rgb
-        else:
-            # 非RGB通道直接简单变换
-            return torch.clamp((normalized_tensor + 1.0) / 2.0, 0.0, 1.0)
+    def denormalize_for_display(self, tensor: torch.Tensor) -> torch.Tensor:
+        """用于TensorBoard显示的可视化转换。
+
+        - 线性HDR路径：RGB线性/非负/缩放→ tone-mapping（Reinhard）→ gamma → [0,1]
+        - 旧路径（[-1,1]）：按旧log1p逆+Reinhard显示
+        """
+        # 只处理RGB通道
+        if tensor.shape[0] >= 3:
+            rgb = tensor[:3] if tensor.shape[0] > 3 else tensor
+            if self.enable_linear_preprocessing:
+                # 输入应为线性HDR缩放后的范围（可>1）
+                lin = torch.clamp(rgb, min=0.0)
+                # 通用tone-mapping（Reinhard + gamma）
+                try:
+                    from src.npu.utils.hdr_vis import tone_map as _tm
+                except Exception:
+                    import sys, os
+                    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'npu', 'utils'))
+                    from hdr_vis import tone_map as _tm
+                # 读取曝光配置（若未来注入到Adapter）
+                exposure = getattr(self, 'exposure', 1.0)
+                adaptive_exposure = getattr(self, 'adaptive_exposure', {'enable': False})
+                ldr = _tm(
+                    lin,
+                    method=self.tone_mapping_for_display,
+                    gamma=self.gamma,
+                    exposure=exposure,
+                    adaptive_exposure=adaptive_exposure,
+                )
+                return ldr
+            else:
+                # 旧路径：严格对应log1p逆
+                rgb_01 = (rgb + 1.0) / 2.0
+                log_min_val = 0.0
+                log_max_val = 5.023574285781275
+                log_values = rgb_01 * (log_max_val - log_min_val) + log_min_val
+                hdr_rgb = torch.expm1(log_values)
+                ldr_rgb = hdr_rgb / (1.0 + hdr_rgb)
+                return torch.clamp(ldr_rgb, 0.0, 1.0)
+        # 非RGB通道
+        if self.enable_linear_preprocessing:
+            return torch.clamp(tensor, 0.0, 1.0)
+        return torch.clamp((tensor + 1.0) / 2.0, 0.0, 1.0)
+
+    def _linear_hdr_preprocessing(self, tensor: torch.Tensor) -> torch.Tensor:
+        """线性HDR预处理：非负 + （可选）sRGB→Linear + 线性缩放
+
+        返回：与输入相同形状，RGB通道按 `scale_factor` 线性缩放，掩码保持[0,1]，MV保持原值
+        """
+        normalized = tensor.clone()
+        # RGB
+        if tensor.shape[0] >= 3:
+            rgb = tensor[:3]
+            rgb_lin = torch.clamp(rgb, min=0.0)
+            if self.enable_srgb_linear and self._kornia_available:
+                try:
+                    import kornia.color as Kcolor
+                    # Kornia转换期望输入在[0,1]，这里仅用于轻度矫正；EXR通常已线性，影响有限
+                    rgb_01 = torch.clamp(rgb_lin, 0.0, 1.0)
+                    rgb_lin = Kcolor.rgb_to_linear_rgb(rgb_01)
+                except Exception:
+                    pass
+            rgb_scaled = rgb_lin / max(self.scale_factor, 1e-8)
+            normalized[:3] = rgb_scaled
+        # 掩码（3,4索引）保持[0,1]
+        if tensor.shape[0] >= 5:
+            for i in range(3, 5):
+                normalized[i] = torch.clamp(tensor[i], 0.0, 1.0)
+        # MV（5,6索引）保持原始像素位移
+        if tensor.shape[0] >= 7:
+            normalized[5:7] = tensor[5:7]
+        return normalized
+
+    def __getstate__(self):
+        """Drop any non-picklable attributes for DataLoader workers."""
+        state = self.__dict__.copy()
+        # Ensure no module objects are kept
+        for k in list(state.keys()):
+            if k.startswith('_module_'):
+                state.pop(k, None)
+        return state
 
 
 def create_colleague_dataloader(data_root: str,

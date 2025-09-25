@@ -8,43 +8,38 @@ import torch
 from typing import Tuple
 
 class ResidualLearningHelper:
-    """残差学习统一实现工具类"""
-    
-    # 全局统一的残差缩放因子（已移除除法操作，设为1.0）
+    """残差学习统一实现工具类（线性HDR版本）"""
+
+    # 全局统一的残差缩放因子（已移除缩放，固定为1.0）
     SCALE_FACTOR = 1.0
-    
+
     @staticmethod
     def compute_residual_target(target_rgb: torch.Tensor, warped_rgb: torch.Tensor) -> torch.Tensor:
         """
-        统一的残差目标计算
-        
+        统一的残差目标计算（线性HDR空间，无范围裁剪）
+
         Args:
-            target_rgb: 目标RGB图像 [C, H, W] 或 [N, C, H, W] 
-            warped_rgb: warped RGB图像 [C, H, W] 或 [N, C, H, W]
-            
+            target_rgb: [C,H,W] 或 [N,C,H,W]，线性HDR预处理后的RGB
+            warped_rgb: [C,H,W] 或 [N,C,H,W]，线性HDR预处理后的RGB
+
         Returns:
-            target_residual: 归一化后的残差目标 ∈ [-1, 1]
+            target_residual: 原始残差（不裁剪、不缩放）
         """
-        raw_residual = target_rgb - warped_rgb  # 直接使用原始残差，不进行缩放
-        # 约束到合理范围 [-1, 1]
-        target_residual = torch.clamp(raw_residual, -1.0, 1.0)
-        return target_residual
-    
-    @staticmethod 
+        return target_rgb - warped_rgb
+
+    @staticmethod
     def reconstruct_from_residual(warped_rgb: torch.Tensor, residual_pred: torch.Tensor) -> torch.Tensor:
         """
-        统一的完整图像重建
-        
+        统一的完整图像重建（线性HDR空间，无范围裁剪）
+
         Args:
-            warped_rgb: warped RGB图像 [C, H, W] 或 [N, C, H, W]
-            residual_pred: 网络预测的残差 ∈ [-1, 1]
-            
+            warped_rgb: [C,H,W] 或 [N,C,H,W]
+            residual_pred: [C,H,W] 或 [N,C,H,W]
+
         Returns:
-            reconstructed_rgb: 重建的完整图像
+            reconstructed_rgb: warped + residual（线性HDR范围，可能>1）
         """
-        reconstructed = warped_rgb + residual_pred  # 直接相加，不进行缩放
-        # 确保输出在合理范围内
-        return torch.clamp(reconstructed, -1.0, 1.0)
+        return warped_rgb + residual_pred
     
     @staticmethod
     def validate_residual_data(input_tensor: torch.Tensor, 

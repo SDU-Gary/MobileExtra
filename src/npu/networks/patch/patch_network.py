@@ -66,13 +66,30 @@ class PatchGatedConvBlock(nn.Module):
         
         self.use_boundary_aware = use_boundary_aware
         
+        # NEW: GroupNorm after conv1/conv2 outputs to stabilize activations across HDR scales
+        # Choose number of groups so that it divides channels. Default channels_per_group=16.
+        def _calc_groups(c: int, cpg: int = 16) -> int:
+            g = max(1, c // cpg)
+            # Ensure divisibility
+            while g > 1 and (c % g != 0):
+                g -= 1
+            return g
+        groups = _calc_groups(channels, 16)
+        self.gn1 = nn.GroupNorm(num_groups=groups, num_channels=channels)
+        self.gn2 = nn.GroupNorm(num_groups=groups, num_channels=channels)
+
         self.final_activation = nn.LeakyReLU(0.2, inplace=True)
     
     def forward(self, x, boundary_mask=None):
         identity = x
         
+        # Conv1 → Gate/Activation (inside) → GroupNorm
         out = self.conv1(x, boundary_mask if self.use_boundary_aware else None)
+        # out = self.gn1(out)
+
+        # Conv2 (linear activation but gated inside) → GroupNorm
         out = self.conv2(out, boundary_mask if self.use_boundary_aware else None)
+        # out = self.gn2(out)
         
         out = out + identity
         return self.final_activation(out)
@@ -220,10 +237,10 @@ class PatchNetwork(nn.Module):
         self.up_conv4 = PatchGatedConv2d(self.ch2 + self.ch1, self.ch1, 3, 1, 1)
         self.decoder4 = PatchGatedConvBlock(self.ch1, use_boundary_aware=True)
         
-        # 输出层
+        # 输出层（线性残差输出，无Tanh）
         self.output_conv = nn.Conv2d(self.ch1, output_channels, 1, 1, 0)
-        self.output_activation = nn.Tanh()  # residual ∈ [-1, 1]
-        self.register_buffer('residual_scale_factor', torch.tensor(3.0))
+        # 线性HDR方案：残差缩放因子=1.0
+        self.register_buffer('residual_scale_factor', torch.tensor(1.0))
         
         self.register_buffer('boundary_kernel', self._create_boundary_kernel())
         
@@ -339,19 +356,17 @@ class PatchNetwork(nn.Module):
         u4 = self.up_conv4(u4, boundary_mask)
         u4 = self.decoder4(u4, boundary_mask)
         
-        #  残差学习: 网络输出残差预测
+        #  残差学习: 网络输出残差预测（线性、无限制）
         residual_prediction = self.output_conv(u4)
-        residual_prediction = self.output_activation(residual_prediction)  # [-1, 1]
         
         #  FIX: 确保输出尺寸与输入完全匹配
         if residual_prediction.shape[2:] != x.shape[2:]:
             residual_prediction = F.interpolate(residual_prediction, size=x.shape[2:], mode='bilinear', align_corners=False)
         
         if return_full_image:
-            # 重建完整图像：warped_rgb + residual * scale_factor
+            # 重建完整图像：warped_rgb + residual * scale_factor（线性HDR，无clamp）
             warped_rgb = x[:, :3]  # 输入的前3通道
             reconstructed_image = warped_rgb + residual_prediction * self.residual_scale_factor
-            reconstructed_image = torch.clamp(reconstructed_image, -1.0, 1.0)
             return residual_prediction, reconstructed_image
         
         return residual_prediction
@@ -385,7 +400,7 @@ class PatchNetwork(nn.Module):
             'boundary_detection': 'Image Edge-Based (Aligned with Loss Function)',
             'skip_connections': 'Full U-Net with Size-Adaptive Interpolation',
             'input_shape': '[B, 7, H, W] (supports arbitrary sizes like 270×480)',
-            'output_shape': '[B, 3, H, W] (residual prediction ∈ [-1, 1])',
+            'output_shape': '[B, 3, H, W] (linear residual prediction)',
             'learning_mode': 'Residual Learning (warped_rgb + residual * scale_factor)',
             'key_improvements': [
                 'Edge-based boundary detection (consistent with loss)',
@@ -450,7 +465,7 @@ if __name__ == "__main__":
     network, residual_pred, model_info = test_patch_network()
     print("SUCCESS: PatchNetwork残差学习版本测试完成")
     print("\n关键特性:")
-    print("- 网络输出: 残差预测 ∈ [-1, 1]")
-    print("- 最终结果: warped_rgb + residual")
+    print("- 网络输出: 线性残差预测（无Tanh约束）")
+    print("- 最终结果: warped_rgb + residual * scale_factor（scale_factor=1.0）")
     print("- 学习任务: 仅学习差异，简化训练")
     print("- 全局建模: 轻量级自注意力替代FFC")

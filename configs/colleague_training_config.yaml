@@ -41,6 +41,8 @@ patch:
   patch_augmentation: false
   augmentation_probability: 0.0
 
+  # （可选）简单网格下的洞采样控制参数（已回退为默认简单网格流程，可忽略）
+
 # 网络配置
 network:
   type: "PatchNetwork"
@@ -54,15 +56,82 @@ network:
     encoder_layers: 5  # 5层编码器
     decoder_layers: 5  # 5层解码器
     channel_progression: "64→96→128→192→256"  # 渐进式通道增长
-    boundary_detection: "edge_based"  # 边缘检测（与损失函数对齐）
+  boundary_detection: "edge_based"  # 边缘检测（与损失函数对齐）
   
+# HDR处理配置（训练与显示统一）
+hdr_processing:
+  enable_linear_preprocessing: true
+  enable_srgb_linear: false
+  scale_factor: 0.70
+  tone_mapping_for_display: reinhard
+  gamma: 2.2
+  exposure: 1.2
+  adaptive_exposure:
+    enable: false
+    target_luminance: 0.18
+    percentile: 0.9
+
 # 训练配置
 training:
   batch_size: 4
   num_workers: 2
-  learning_rate: 0.0005  # 经过优化的学习率 (5e-4)
+  learning_rate: 0.00005  # 5e-5
   weight_decay: 0.0001  # 1e-4
+  gradient_clip_val: 0.5  # 启用梯度裁剪（clip_norm）
   max_epochs: 200
+  warmup_steps: 500         # 学习率warmup步数（step级）
+  warmup_start_factor: 0.1   # warmup起始比例
+  
+  # 输入归一化：关闭 per-patch 归一化，改用全局标准化
+  input_normalization:
+    enable: false
+    method: per_patch_percentile
+    percentile: 0.99
+    min_scale: 1.0
+    max_scale: 512.0
+
+  # 全局标准化（单个 mu、sigma）
+  global_standardization:
+    enable: true
+    stats_path: "./configs/hdr_global_stats.json"
+    apply_to_channels: "rgb"
+    include_holes: false
+
+# 统一归一化配置入口（优先级高于上述 legacy 配置）
+normalization:
+  type: log   # options: none | per_patch | global | log
+  # per_patch params
+  percentile: 0.99
+  min_scale: 1.0
+  max_scale: 512.0
+  # global params
+  stats_path: "./configs/hdr_global_stats.json"
+  # log params
+  log_epsilon: 1.0e-6     # raise epsilon to improve gradients in very dark (hole) regions
+  log_delta_scale: 0.90   # kept for legacy mode when abs_max is disabled
+
+  # NEW: absolute cap mode for log-delta amplitude (overrides scale*denom when > 0)
+  log_delta_abs_max: 16.0   # typical HDR: need ~13-15 to lift from 1e-6 to ~0.5; set 0 to disable
+  log_delta_alpha: 1.2      # multiplier for tanh output in abs-max mode
+
+  # NEW: apply log-space delta only inside holes (+optional ring)
+  log_apply_delta_in_holes: true
+  log_delta_mask_ring_scale: 0.5
+  log_delta_mask_ring_kernel: 3
+
+  # NEW: optional log-domain supervision for holes (helps early training)
+  log_supervision_enable: true
+  log_supervision_weight: 0.8
+  log_supervision_type: l1   # l1 | huber | charbonnier
+  log_supervision_huber_delta: 0.2
+  
+  # 输入归一化（线性HDR → 每patch按尺度归一化 → 反归一化）
+  input_normalization:
+    enable: true
+    method: per_patch_percentile
+    percentile: 0.99
+    min_scale: 1.0
+    max_scale: 512.0
   
   # 优化器配置
   optimizer: "AdamW"
@@ -70,20 +139,77 @@ training:
   scheduler_params:
     T_max: 100
     eta_min: 0.000001  # 1e-6
+  optimizer_params:
+    eps: 1.0e-6
+    beta2: 0.98
 
 # 损失函数配置
 loss:
   type: "ResidualInpaintingLoss"
   weights:
-    mse: 1.0
-    l1: 0.5
-    perceptual: 0.8  # 提升感知损失权重
-    edge: 0.5        # 提升边缘损失权重
-    boundary: 0.3
+    l1: 1.0
+    perceptual: 2.0
+    edge: 0.1
+    boundary: 0.1
+    hole: 0.5            # 洞内鲁棒L1权重（洞内重建）
+    ctx: 0.05            # 非洞“保持”项权重（小幅约束，稳定非洞颜色）
+    hole_ring_scale: 0.5 # 洞边环加权强度（0~1），增强洞边锐利与一致性
+    hole_ring_kernel: 3  # 洞边环核大小（奇数，>=3），控制环宽度
+  weight_schedule:
+    enable: true
+    phase1_end: 2000     # 0..2000 steps
+    phase2_end: 3000     # 2000..3000 steps transition
+    phase3_end: 8000     # 2000..8000 ramp others to target
+    hole_decay_end: 12000 # 8000..12000 decay hole weight
+    # targets
+    log_p1: 0.9
+    log_p2: 0.3
+    perc_p1: 2.0
+    perc_p2: 8.0
+    hole_p1: 0.5
+    hole_p4: 0.2
+    other_target: 1.0   # edge/boundary/ctx target after ramp
+    color_stats: 0.0     # NEW: 洞内色彩统计（均值/方差）项权重，默认0关闭
   
   # 残差学习特定配置
-  residual_scale_factor: 2.0
+  residual_scale_factor: 1.0
   spatial_attention: true
+
+  # （可选）鲁棒损失开关：对像素级重建项生效（替换L1/MSE为Huber/Charbonnier）
+  robust:
+    enable: true
+    type: huber            # huber | charbonnier
+    params:
+      delta: 0.2           # SmoothL1 beta
+      epsilon: 0.003       # Charbonnier epsilon
+    schedule:
+      enabled: false
+      start_epoch: 0
+      end_epoch: 30
+      to: l1
+  
+  # 感知/边缘掩码化选项（仅在洞及洞边作用，减少非洞扰动）
+  masking:
+    mask_perceptual: true  # 将感知损失只作用于洞区及洞边
+    mask_edge: true        # 将边缘损失只作用于洞区及洞边
+    mask_boundary: true    # 将边界损失只作用于洞区及洞边
+
+  # NEW: 面积补偿与增强项配置（默认关闭）
+  area_compensation:
+    enable: true
+    min_frac: 0.05      # 洞占比低于此阈值时进行补偿
+    gamma: 1.0          # 幂次放大
+    max_scale: 4.0      # 最大放大倍数限制
+    apply_to: [perceptual, edge, boundary]
+
+  enhanced:
+    color_stats:
+      enable: false
+      # 若未在 weights.color_stats 设置权重，这里可指定：
+      weight: 0.05
+      domain: ldr        # ldr | hdr，建议 ldr 感知域
+      use_std: true      # 是否同时约束标准差
+      epsilon: 1.0e-6
 
 # 验证和监控
 validation:
@@ -94,6 +220,11 @@ monitoring:
   tensorboard_log_dir: "./logs/colleague_training"
   model_save_dir: "./models/colleague"
   save_frequency: 10
+  
+visualization:
+  grid:
+    max_patches: 8
+    panel_order: ["input", "target", "pred"]
   
 # 内存管理
 memory:

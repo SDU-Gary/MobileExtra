@@ -71,7 +71,9 @@ except ImportError:
 class PatchVisualizationHelper:
     """Patch visualization helper for hole detection and processing display"""
     
-    def __init__(self):
+    def __init__(self, tone_mapping: str = 'reinhard', gamma: float = 2.2,
+                 exposure: float = 1.0, adaptive_exposure: Optional[Dict[str, Any]] = None,
+                 mulaw_mu: float = 500.0):
         self.colors = [
             (255, 0, 0),    # Red
             (0, 255, 0),    # Green
@@ -82,6 +84,11 @@ class PatchVisualizationHelper:
             (255, 128, 0),  # Orange
             (128, 0, 255),  # Purple
         ]
+        self.tone_mapping = (tone_mapping or 'reinhard').lower()
+        self.gamma = float(gamma)
+        self.exposure = float(exposure)
+        self.adaptive_exposure = adaptive_exposure or {'enable': False}
+        self.mulaw_mu = float(mulaw_mu)
     
     def visualize_hole_detection(self, 
                                 original_image: np.ndarray,
@@ -129,48 +136,75 @@ class PatchVisualizationHelper:
                          patch_inputs: torch.Tensor,
                          patch_targets: torch.Tensor,
                          patch_predictions: torch.Tensor,
-                         max_patches: int = 16) -> torch.Tensor:
-        """Create patch grid: input|target|prediction"""
+                         max_patches: int = 16,
+                         panel_order: Optional[List[str]] = None) -> torch.Tensor:
+        """Create patch grid with configurable panel order.
+
+        panel_order: list of items among ['input','target','pred']
+        """
+        order = panel_order or ['input', 'target', 'pred']
         N = min(patch_inputs.shape[0], max_patches)
         
         inputs_rgb = patch_inputs[:N, :3]
         targets = patch_targets[:N]
         predictions = patch_predictions[:N]
         
+        panel_map = {
+            'input': inputs_rgb,
+            'target': targets,
+            'pred': predictions,
+        }
         comparison_patches = []
         for i in range(N):
-            patch_row = torch.cat([
-                inputs_rgb[i], targets[i], predictions[i]
-            ], dim=2)
+            panels = [panel_map[k][i] for k in order if k in panel_map]
+            if not panels:
+                continue
+            patch_row = torch.cat(panels, dim=2)
             comparison_patches.append(patch_row)
         
         if len(comparison_patches) > 0:
             grid = torch.cat(comparison_patches, dim=1)
         else:
-            grid = torch.zeros(3, 128, 384)
-        
-        grid = self._denormalize_hdr_for_display(grid)
-        
+            # Fallback canvas (3 panels * 128 width)
+            grid = torch.zeros(3, 128, 128 * max(1, len(order)))
+
+        try:
+            grid = self._denormalize_hdr_for_display(grid)
+        except Exception:
+            # Fallback: return unclamped grid to avoid None
+            grid = torch.clamp(grid, 0.0, 1.0)
+
         return grid
     
-    def _denormalize_hdr_for_display(self, normalized_tensor: torch.Tensor) -> torch.Tensor:
-        """HDR denormalization for TensorBoard display"""
-        # [-1, 1] -> [0, 1]
-        rgb_01 = (normalized_tensor + 1.0) / 2.0
-        
-        # [0, 1] -> log space [0, 5.024]
-        log_min_val = 0.0
-        log_max_val = 5.023574285781275  # log1p(151.0)
-        log_values = rgb_01 * (log_max_val - log_min_val) + log_min_val
-        
-        # Log space -> HDR space
-        hdr_rgb = torch.expm1(log_values)
-        
-        # HDR -> LDR tone mapping
-        ldr_rgb = hdr_rgb / (1.0 + hdr_rgb)
-        display_rgb = torch.clamp(ldr_rgb, 0.0, 1.0)
-        
-        return display_rgb
+    def _denormalize_hdr_for_display(self, img: torch.Tensor) -> torch.Tensor:
+        """统一显示转换：
+        - 若输入像旧的[-1,1]，按旧log1p逆；
+        - 否则视为线性HDR缩放后的值，调用通用tone-mapping（Reinhard+gamma）。
+        """
+        vmin = float(img.min().item()) if torch.is_tensor(img) else -2.0
+        vmax = float(img.max().item()) if torch.is_tensor(img) else 2.0
+        if vmin >= -1.1 and vmax <= 1.1:
+            rgb_01 = (img + 1.0) / 2.0
+            log_min_val = 0.0
+            log_max_val = 5.023574285781275  # log1p(151.0)
+            log_values = rgb_01 * (log_max_val - log_min_val) + log_min_val
+            hdr_rgb = torch.expm1(log_values)
+            # 使用通用tone-mapping（默认gamma=2.2）
+            try:
+                from src.npu.utils.hdr_vis import tone_map as _tm
+            except Exception:
+                import sys, os
+                sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'npu', 'utils'))
+                from hdr_vis import tone_map as _tm
+            return _tm(hdr_rgb, method=self.tone_mapping, gamma=self.gamma, exposure=self.exposure, adaptive_exposure=self.adaptive_exposure)
+        # 线性HDR显示路径（通用tone-mapping）
+        try:
+            from src.npu.utils.hdr_vis import tone_map as _tm
+        except Exception:
+            import sys, os
+            sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'npu', 'utils'))
+            from hdr_vis import tone_map as _tm
+        return _tm(img, method=self.tone_mapping, gamma=self.gamma, exposure=self.exposure, adaptive_exposure=self.adaptive_exposure)
     
     def visualize_training_progress(self,
                                    epoch: int,
@@ -257,19 +291,48 @@ class PatchTensorBoardLogger:
         # 创建TensorBoard writer
         self.writer = SummaryWriter(self.log_dir / 'patch_tensorboard')
         
+        # 读取HDR显示配置
+        hdr_cfg = self.config.get('hdr_processing', {})
+        self.tone_mapping = str(hdr_cfg.get('tone_mapping_for_display', 'reinhard')).lower()
+        self.gamma = float(hdr_cfg.get('gamma', 2.2))
+        self.exposure = float(hdr_cfg.get('exposure', 1.0))
+        self.adaptive_exposure = hdr_cfg.get('adaptive_exposure', {'enable': False})
+        # mu-law 参数已移除，展示沿用通用tone-map配置
+        
         #  FIX: 创建colleague数据集实例用于反归一化（修复可视化问题）
         # 在测试环境中可能会失败，所以用try-catch包装
         try:
+            hdr_cfg = self.config.get('hdr_processing', {})
+            data_root = self.config.get('data_root', './data')
+            adapter_kwargs = dict(
+                enable_linear_preprocessing=hdr_cfg.get('enable_linear_preprocessing', True),
+                enable_srgb_linear=hdr_cfg.get('enable_srgb_linear', True),
+                scale_factor=hdr_cfg.get('scale_factor', 0.70),
+                tone_mapping_for_display=hdr_cfg.get('tone_mapping_for_display', 'reinhard'),
+                gamma=hdr_cfg.get('gamma', 2.2),
+                exposure=hdr_cfg.get('exposure', 1.0),
+                adaptive_exposure=hdr_cfg.get('adaptive_exposure', {'enable': False}),
+            )
             self.dataset_for_denorm = ColleagueDatasetAdapter(
-                data_root="./data/processed_bistro",  # colleague数据路径
-                split='train'
+                data_root=data_root,  # 传入数据根目录（包含 processed_bistro）
+                split='train',
+                **adapter_kwargs
             )
         except Exception as e:
             print(f"WARNING: Dataset initialization failed (normal in test environment): {e}")
             self.dataset_for_denorm = None
         
         # 可视化助手
-        self.viz_helper = PatchVisualizationHelper()
+        self.viz_helper = PatchVisualizationHelper(
+            tone_mapping=self.tone_mapping,
+            gamma=self.gamma,
+            exposure=self.exposure,
+            adaptive_exposure=self.adaptive_exposure,
+        )
+        # Grid settings
+        grid_cfg = self.config.get('grid', {})
+        self.grid_max_patches = int(grid_cfg.get('max_patches', 8))
+        self.grid_panel_order = grid_cfg.get('panel_order', ['input', 'target', 'pred'])
         
         # 统计信息
         self.step_count = 0
@@ -304,12 +367,23 @@ class PatchTensorBoardLogger:
         self.step_count = step
         self.epoch_count = epoch
         
-        # 1. 记录损失
+        # 1. 记录损失（过滤None/NaN/Inf）
+        import math
         for loss_name, loss_value in loss_dict.items():
-            if isinstance(loss_value, torch.Tensor):
-                self.writer.add_scalar(f'Loss/{loss_name}', loss_value.item(), step)
-            else:
-                self.writer.add_scalar(f'Loss/{loss_name}', loss_value, step)
+            if loss_value is None:
+                continue
+            try:
+                if isinstance(loss_value, torch.Tensor):
+                    v = loss_value.detach()
+                    v = torch.nan_to_num(v, nan=0.0, posinf=1e6, neginf=0.0)
+                    self.writer.add_scalar(f'Loss/{loss_name}', float(v.item()), step)
+                else:
+                    v = float(loss_value)
+                    if not math.isfinite(v):
+                        v = 0.0
+                    self.writer.add_scalar(f'Loss/{loss_name}', v, step)
+            except Exception as e:
+                print(f"WARNING: log_training_step scalar failed for {loss_name}: {e}")
         
         # 更新损失历史
         if 'total' in loss_dict:
@@ -345,12 +419,23 @@ class PatchTensorBoardLogger:
                            val_loss_dict: Dict[str, torch.Tensor],
                            val_metrics: Optional[Dict[str, float]] = None):
         """记录验证步骤"""
-        # 验证损失
+        # 验证损失（过滤None/NaN/Inf）
+        import math
         for loss_name, loss_value in val_loss_dict.items():
-            if isinstance(loss_value, torch.Tensor):
-                self.writer.add_scalar(f'Validation/{loss_name}', loss_value.item(), step)
-            else:
-                self.writer.add_scalar(f'Validation/{loss_name}', loss_value, step)
+            if loss_value is None:
+                continue
+            try:
+                if isinstance(loss_value, torch.Tensor):
+                    v = loss_value.detach()
+                    v = torch.nan_to_num(v, nan=0.0, posinf=1e6, neginf=0.0)
+                    self.writer.add_scalar(f'Validation/{loss_name}', float(v.item()), step)
+                else:
+                    v = float(loss_value)
+                    if not math.isfinite(v):
+                        v = 0.0
+                    self.writer.add_scalar(f'Validation/{loss_name}', v, step)
+            except Exception as e:
+                print(f"WARNING: log_validation_step scalar failed for {loss_name}: {e}")
         
         # 验证指标
         if val_metrics:
@@ -415,16 +500,58 @@ class PatchTensorBoardLogger:
         # patch_targets 是目标完整RGB  
         # patch_predictions 是网络重建的完整RGB
         
-        # 创建对比网格
-        grid_tensor = self.viz_helper.create_patch_grid(
-            patch_inputs.cpu(),      # 输入（前3通道是warped RGB）
-            patch_targets.cpu(),     # 目标完整RGB
-            patch_predictions.cpu(), # 重建完整RGB
-            max_patches=8  # 最多显示8个patches
-        )
-        
-        # 添加到TensorBoard
-        self.writer.add_image(f'Comparison/{tag}', grid_tensor, step)
+        try:
+            # Debug guards for None/invalid inputs
+            if patch_inputs is None or patch_targets is None or patch_predictions is None:
+                print("WARNING: log_patch_comparison received None inputs:",
+                      type(patch_inputs), type(patch_targets), type(patch_predictions))
+                return
+            if not isinstance(patch_inputs, torch.Tensor) or not isinstance(patch_targets, torch.Tensor) or not isinstance(patch_predictions, torch.Tensor):
+                print("WARNING: log_patch_comparison expects tensors, got:",
+                      type(patch_inputs), type(patch_targets), type(patch_predictions))
+                return
+            # 创建对比网格
+            grid_tensor = self.viz_helper.create_patch_grid(
+                patch_inputs.cpu(),      # 输入（前3通道是warped RGB）
+                patch_targets.cpu(),     # 目标完整RGB
+                patch_predictions.cpu(), # 重建完整RGB
+                max_patches=self.grid_max_patches,
+                panel_order=self.grid_panel_order
+            )
+            if grid_tensor is None:
+                print("WARNING: create_patch_grid returned None")
+                return
+            if not isinstance(grid_tensor, torch.Tensor):
+                return
+            if grid_tensor.numel() == 0:
+                print("WARNING: log_patch_comparison grid has zero elements")
+                return
+            # Sanitize: replace NaN/Inf and clamp to [0,1]
+            grid_tensor = torch.nan_to_num(grid_tensor, nan=0.0, posinf=1.0, neginf=0.0)
+            grid_tensor = torch.clamp(grid_tensor, 0.0, 1.0)
+            # Convert to numpy explicitly to avoid internal conversion issues
+            grid_np = grid_tensor.detach().cpu().numpy()
+            # Debug basic stats
+            try:
+                print(f"[TB] {tag} grid stats: min={grid_np.min():.4f}, max={grid_np.max():.4f}, step={step}")
+            except Exception:
+                pass
+            if grid_np.ndim != 3:
+                print("WARNING: grid_np unexpected ndim:", grid_np.shape)
+                return
+            # 添加到TensorBoard（numpy路径）
+            self.writer.add_image(f'Comparison/{tag}', grid_np, step)
+            # Also save PNG snapshot for external verification
+            try:
+                import cv2
+                # Convert CHW->HWC and to uint8
+                hwc = (grid_np.transpose(1,2,0) * 255.0).clip(0,255).astype('uint8')
+                png_path = self.images_dir / f'{tag}_step_{int(step):06d}.png'
+                cv2.imwrite(str(png_path), cv2.cvtColor(hwc, cv2.COLOR_RGB2BGR))
+            except Exception as e:
+                print(f"WARNING: failed to save grid png: {e}")
+        except Exception as e:
+            print(f"WARNING: log_patch_comparison failed: {e}")
     
     def log_training_progress(self,
                              step: int,

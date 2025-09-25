@@ -41,6 +41,22 @@ class PatchInpaintingConfig:
     max_batch_size: int = 8
     enable_performance_stats: bool = False
 
+    # Input normalization (match training: per-patch scalar scale on RGB)
+    enable_input_normalization: bool = True
+    norm_method: str = "per_patch_percentile"  # reserved for future
+    norm_percentile: float = 0.99
+    norm_min_scale: float = 1.0
+    norm_max_scale: float = 512.0
+
+    # Global standardization (single mu, sigma)
+    enable_global_standardization: bool = True
+    gs_mu: float = 0.0
+    gs_sigma: float = 1.0
+    gs_apply_to_channels: str = "rgb"
+    # Unified normalization selection
+    normalization_type: str = "global"  # options: none|per_patch|global|log
+    log_epsilon: float = 1.0e-8
+
 
 class PatchFusion:
     """Fuses repaired patches back into full image with feathering."""
@@ -276,17 +292,76 @@ class PatchBasedInpainting(nn.Module):
         """Process patches in batches to avoid memory overflow."""
         N, C, H, W = patches.shape
         batch_size = self.config.max_batch_size
-        
+
         repaired_patches = []
-        
+
         for i in range(0, N, batch_size):
             batch_end = min(i + batch_size, N)
             batch_patches = patches[i:batch_end]
             
             with torch.no_grad() if not self.training else torch.enable_grad():
-                batch_repaired = self.patch_network(batch_patches)
-                repaired_patches.append(batch_repaired)
-        
+                # Inference: prefer global standardization if enabled; else optional per-patch normalization
+                if getattr(self.config, 'normalization_type', 'global') == 'global' and getattr(self.config, 'enable_global_standardization', True):
+                    warped_rgb = batch_patches[:, :3]
+                    mu = torch.as_tensor(self.config.gs_mu, dtype=warped_rgb.dtype, device=warped_rgb.device)
+                    sigma = torch.as_tensor(self.config.gs_sigma, dtype=warped_rgb.dtype, device=warped_rgb.device)
+                    Xn = (warped_rgb - mu) / torch.clamp(sigma, min=1e-6)
+                    batch_patches_norm = batch_patches.clone()
+                    batch_patches_norm[:, :3] = Xn
+                    batch_residual_norm = self.patch_network(batch_patches_norm)
+                    repaired = (Xn + batch_residual_norm) * sigma + mu
+                elif getattr(self.config, 'normalization_type', '') == 'per_patch' and getattr(self.config, 'enable_input_normalization', False):
+                    warped_rgb = batch_patches[:, :3]
+                    B = warped_rgb.shape[0]
+                    # Compute per-patch scale b using percentile; fallback to amax if needed
+                    try:
+                        q = torch.quantile(warped_rgb.view(B, -1), self.config.norm_percentile, dim=1)
+                    except Exception:
+                        q = warped_rgb.view(B, -1).amax(dim=1)
+                    b = q.view(-1, 1, 1, 1)
+                    b = torch.clamp(b, min=self.config.norm_min_scale, max=self.config.norm_max_scale)
+
+                    # Normalize RGB channels; keep masks/MV unchanged
+                    batch_patches_norm = batch_patches.clone()
+                    batch_patches_norm[:, :3] = batch_patches_norm[:, :3] / b
+
+                    # Predict residual in normalized domain
+                    batch_residual_norm = self.patch_network(batch_patches_norm)
+
+                    # Reconstruct in normalized domain, then de-normalize back to HDR
+                    repaired = (warped_rgb / b + batch_residual_norm) * b
+                elif getattr(self.config, 'normalization_type', '') == 'log':
+                    # Scheme B: true log-space residual learning (bounded delta)
+                    warped_rgb = batch_patches[:, :3]
+                    eps = torch.as_tensor(self.config.log_epsilon, dtype=warped_rgb.dtype, device=warped_rgb.device)
+                    warped_pos = torch.clamp(warped_rgb, min=0.0)
+                    log_img = torch.log(warped_pos + eps)
+                    B = warped_rgb.shape[0]
+                    min_log = torch.amin(log_img.view(B, -1), dim=1).view(-1, 1, 1, 1)
+                    max_log = torch.amax(log_img.view(B, -1), dim=1).view(-1, 1, 1, 1)
+                    denom = torch.clamp(max_log - min_log, min=1e-6)
+                    Xn = (log_img - min_log) / denom
+                    batch_patches_norm = batch_patches.clone()
+                    batch_patches_norm[:, :3] = Xn
+                    batch_delta_log = self.patch_network(batch_patches_norm)
+                    # Scale delta by dynamic range with configurable factor
+                    beta = getattr(self.config, 'log_delta_scale', 0.1)
+                    delta_log = (beta * denom) * torch.tanh(batch_delta_log)
+                    log_hat = log_img + delta_log
+                    repaired = torch.exp(log_hat) - eps
+                else:
+                    # Original path: direct residual prediction in HDR domain
+                    batch_residual = self.patch_network(batch_patches)
+                    try:
+                        from train.residual_learning_helper import ResidualLearningHelper
+                    except Exception:
+                        import sys, os
+                        sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'train'))
+                        from residual_learning_helper import ResidualLearningHelper
+                    repaired = ResidualLearningHelper.reconstruct_from_residual(batch_patches[:, :3], batch_residual)
+
+                repaired_patches.append(repaired)
+
         return torch.cat(repaired_patches, dim=0)
     
     def get_performance_stats(self) -> Dict[str, Union[int, float]]:

@@ -35,7 +35,7 @@ def validate_config():
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
         
-        print("📋 配置验证:")
+        print(" 配置验证:")
         
         # 检查简单网格策略配置
         patch_config = config.get('patch', {})
@@ -183,7 +183,7 @@ def start_training():
             return False
         
         print(f" 使用训练脚本: {selected_script}")
-        print(f"📋 使用配置文件: ./configs/colleague_training_config.yaml")
+        print(f" 使用配置文件: ./configs/colleague_training_config.yaml")
         
         # 启动训练
         cmd = [

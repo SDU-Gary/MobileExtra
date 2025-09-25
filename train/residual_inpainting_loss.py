@@ -18,8 +18,12 @@ class VGGFeatureExtractor(nn.Module):
     def __init__(self, feature_layers: list = [1, 6, 11, 20, 29]):
         super().__init__()
         
-        # Load pretrained VGG16
-        vgg = models.vgg16(pretrained=True)
+        # Load pretrained VGG16 (new API with weights; fallback for older torchvision)
+        try:
+            weights = models.VGG16_Weights.DEFAULT  # torchvision >= 0.13
+            vgg = models.vgg16(weights=weights)
+        except Exception:
+            vgg = models.vgg16(pretrained=True)
         self.features = vgg.features
         
         # Freeze VGG parameters

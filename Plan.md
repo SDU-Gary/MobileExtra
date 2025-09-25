@@ -19,6 +19,47 @@
 
 ## 详细修改方案
 
+### 变更点-文件映射清单（函数/行级）
+
+数据预处理与可视化
+- train/colleague_dataset_adapter.py:379 调用替换 `_normalize_to_tanh_range()` → `_linear_hdr_preprocessing()`（线性HDR缩放，SCALE_FACTOR=0.70，可选 sRGB→Linear）
+- train/colleague_dataset_adapter.py:380 同步替换目标RGB的归一化调用
+- train/colleague_dataset_adapter.py:401 重写为 `_linear_hdr_preprocessing`（移除 log1p/[-1,1]，非负+线性缩放）
+- train/colleague_dataset_adapter.py:457 `denormalize_for_display()` 改为 线性HDR→(可选Linear→sRGB)→Reinhard→gamma→[0,1]
+- train/patch_tensorboard_logger.py:156 `_denormalize_hdr_for_display()` 改为与上面一致的显示tone-mapping（共享SCALE_FACTOR/gamma）
+
+残差学习统一
+- train/residual_learning_helper.py:16 `compute_residual_target()` 移除 clamp(-1,1)，直接返回线性HDR残差
+- train/residual_learning_helper.py:33 `reconstruct_from_residual()` 移除最终 clamp(-1,1)，直接 warped+residual
+- train/residual_learning_helper.py:13 `SCALE_FACTOR = 1.0`（残差不再额外缩放）
+
+网络输出层与前向逻辑
+- src/npu/networks/patch/patch_network.py:225 移除 `self.output_activation = nn.Tanh()` 定义
+- src/npu/networks/patch/patch_network.py:226 `residual_scale_factor` 3.0 → 1.0
+- src/npu/networks/patch/patch_network.py:343 不再调用 `self.output_activation(...)`
+- src/npu/networks/patch/patch_network.py:353 `return_full_image` 分支移除 clamp(-1,1)
+- src/npu/networks/patch/patch_network.py:388 `get_model_info()` 更新 `output_shape` 文案，去除“residual ∈ [-1,1]”
+
+推理融合路径（避免把残差当成RGB）
+- src/npu/networks/patch_inpainting.py:255 `_process_patches_in_batches` 的返回目前为残差；在 fuse 前用 `ResidualLearningHelper.reconstruct_from_residual(patch_rgb, residual)` 得到完整RGB补丁
+- src/npu/networks/patch_inpainting.py:286 也可在此处直接组合：`batch_full = reconstruct_from_residual(batch_patches[:,:3], batch_repaired)`
+- src/npu/networks/patch_inpainting.py:258 `fuse_patches` 第二个参数应传完整RGB补丁
+
+损失函数与训练循环（线性HDR + VGG在tone-mapped）
+- train/patch_training_framework.py:788 训练侧已用 `reconstruct_from_residual()` 组合；确保无多余 clamp
+- train/patch_training_framework.py:895 验证侧同上
+- train/residual_inpainting_loss.py（如启用）：核心重建损失在“线性HDR完整图像”上；VGG感知在 tone-mapped 输入上，权重≈0.02
+
+输入归一化工具（明确与训练链路的边界）
+- src/npu/networks/input_normalizer.py:124 `denormalize_output()` 现假设tanh；训练链路不再依赖此逻辑，改为工具化显示（线性HDR→tone-mapping）或加注释避免误用
+- src/npu/networks/input_normalizer.py:68 `_process_rgb()` 为旧LDR方案；训练时避免介入，留作推理/工具用途
+
+配置与文档
+- configs/colleague_training_config.yaml 新增 `hdr_processing` 段（scale_factor: 0.70, enable_srgb_linear: true, tone_mapping_for_display: reinhard, gamma: 2.2）
+- 同文件 `training`（learning_rate: 5e-5, gradient_clip_val: 0.5, enable_amp: false）
+- 同文件 `network`（remove_output_tanh: true, residual_scale_factor: 1.0）
+- Plan.md 已加入统计落地与鲁棒损失开关（步骤8，低优先级）
+
 ### 步骤0：准备性分析与架构整理（关键）
 
 新增与强化的准备任务：
@@ -40,6 +81,20 @@
 - 数据分布统计报告（含p95/p99、通道/亮度直方图）
 - 初始`SCALE_FACTOR`与上限策略建议
 - 统一HDR配置草案（供后续阶段引用）
+ - 最小验证输出：tone-mapped 单子集预览（ref/warp_hole）与 ref↔warp_hole 并排对比网格（pair-grid），验证“线性HDR→Reinhard+gamma→显示”与 sRGB→Linear 一致性
+
+
+## 基于统计的参数落地（processed_bistro）
+
+数据来源：`logs/hdr_stats/processed_bistro_stats.json`（max_files=200，sample_per_file=200000）
+
+- 聚合亮度分布（ref）：p50≈0.145，p90≈0.500，p95≈0.703，p99≈85.85
+- 通道 p95（ref）：R≈0.422，G≈0.656，B≈2.510；蓝通道长尾更明显
+- 结论与建议：
+  - 初始 `SCALE_FACTOR = 0.70`（使亮度 p95 约映射到 1.0）
+  - 备选回退：若初期不稳定，可短暂用 p90≈0.50；
+  - 备选上限：如需更保守压制通道极值，可用“通道最大 p95≈2.51”，但会让大多数像素远低于1，不建议作为默认
+- 稳定性：保持低LR（5e-5）、启用梯度裁剪（0.5~1.0）、禁用AMP；感知损失使用 tone-mapped 输入且权重低（0.01~0.02）
 
 
 ### 步骤1：数据预处理重构（`train/colleague_dataset_adapter.py`）
@@ -107,6 +162,24 @@
 - 性能基准：仅PC端（移动端量化暂缓）
 
 
+### 步骤8：鲁棒损失（Charbonnier/Huber）开关（低优先级，HDR管线稳定后）
+
+目的：在HDR长尾高光场景下抑制异常值主导梯度，提升收敛稳定性与总体画质。
+
+实施要点：
+- 位置：用于“线性HDR空间”的重建项（L1/MSE的替代或混合）；边缘/边界项可选用鲁棒版本；VGG感知仍在tone-mapped空间，无需鲁棒。
+- 形式：
+  - Huber（SmoothL1）：小残差~L2，大残差~L1（beta=delta）
+  - Charbonnier：sqrt(r^2 + eps^2)
+- 参数建议（与 scale_factor=0.70 对齐）：
+  - Huber：delta=0.2（范围0.1~0.3可试）
+  - Charbonnier：epsilon=0.003（范围1e-3~1e-2可试）
+- 调度（可选）：在前若干epoch启用鲁棒，后期退火为L1/降低权重，逐步重视高光细节
+- 亮区加权（可选）：对线性HDR中|r|>2.0或tone-mapped的top 1%区域降低权重/更强鲁棒
+
+优先级：待步骤1~7完成并验证稳定后再实施；默认关闭，提供配置开关与回退策略。
+
+
 ## 预期影响与注意事项
 
 - 正面：色彩准确性明显提升，高亮与自发光区域物理合理；损失与学习空间一致
@@ -122,7 +195,7 @@
 ```yaml
 hdr_processing:
   enable_linear_preprocessing: true
-  scale_factor: <由步骤0统计确定>   # 初值如 100.0，后续根据统计调整
+  scale_factor: 0.70                 # 来自统计：ref 亮度 p95≈0.703
   enable_srgb_linear: true            # 已确认Kornia可用
   tone_mapping_for_display: reinhard  # display与VGG统一，选reinhard/aces/exposure
   gamma: 2.2
@@ -164,6 +237,28 @@ network:
 - 统一配置落地：可视化/感知与显示色调映射一致
 - 输出层无`tanh`，残差/重建全链路无`clamp(-1,1)`
 - 训练侧启用梯度裁剪；AMP关闭
+
+
+（可选，低优先级）鲁棒损失配置示例：
+
+```yaml
+loss:
+  robust:
+    enable: false            # 默认关闭，HDR管线稳定后再启用
+    type: huber              # huber | charbonnier
+    params:
+      delta: 0.2             # 对应SmoothL1Loss(beta)
+      epsilon: 0.003         # Charbonnier的epsilon
+    schedule:                # 可选退火策略
+      enabled: false
+      start_epoch: 0
+      end_epoch: 30
+      to: l1                 # huber/charbonnier -> l1
+    highlight_handling:      # 可选：亮区抑制/加权
+      enabled: false
+      residual_threshold: 2.0
+      decay: 0.5
+```
 
 
 ## 渐进式发布与回退方案
