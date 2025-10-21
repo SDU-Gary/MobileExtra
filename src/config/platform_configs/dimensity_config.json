@@ -1,0 +1,62 @@
+{
+  /**
+   * @file dimensity_config.json
+   * @brief 联发科天玑平台配置文件
+   * 
+   * 配置说明：
+   * - 针对联发科天玑9000/8000/7000系列优化
+   * - Mali GPU + APU异构配置
+   * - MediaTek特有功能适配
+   * - HyperEngine游戏优化集成
+   * 
+   * 支持芯片：
+   * - 天玑9200/9000: 旗舰配置
+   * - 天玑8200/8100: 高端配置
+   * - 天玑7050/7025: 中端配置
+   * 
+   * 优化重点：
+   * - APU3.0架构最大化利用
+   * - Mali GPU计算优化
+   * - LPDDR5X内存优化
+   * - 游戏模式集成
+   * 
+   * @author 配置管理团队
+   * @date 2025-07-28
+   * @version 1.0
+   */
+  
+  "platform_info": {
+    "chip_vendor": "MediaTek", 
+    "chip_series": "Dimensity",
+    "supported_models": ["MT6983", "MT6895", "MT6877", "MT6833"],
+    "min_android_version": "11.0"
+  },
+  
+  "performance_config": {
+    "max_gpu_memory_mb": 180,
+    "max_system_memory_mb": 140, 
+    "max_network_parameters": 2800000,
+    "target_fps": 120,
+    "max_latency_ms": 8.5
+  },
+  
+  "degradation_thresholds": {
+    "temperature_warning": 43.0,
+    "temperature_critical": 48.0,
+    "battery_warning": 15.0, 
+    "battery_critical": 10.0,
+    "apu_utilization_limit": 80.0,
+    "gpu_utilization_limit": 85.0
+  },
+  
+  "optimization_params": {
+    "resolution_scale_factors": [1.0, 0.85, 0.7, 0.6, 0.5],
+    "supported_precisions": ["FP16", "INT8"],
+    "supports_compute_shader": true,
+    "preferred_npu_backend": "NeuPilot",
+    "gpu_texture_formats": ["RGBA8", "RG16F", "R32F"],
+    "hyperengine_integration": true
+  },
+  
+  "TODO": "完善天玑平台的APU和Mali GPU协同配置"
+}

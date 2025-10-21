@@ -1,0 +1,225 @@
+data:
+  data_format: processed_bistro
+  data_root: ./data
+  dataset_type: colleague
+  processed_bistro_path: ./data/processed_bistro
+  required_subdirs:
+  - warp_hole
+  - ref
+  - bistro
+  splits:
+    test: test
+    train: train
+    val: val
+gan:
+  discriminator:
+    base_channels: 64
+    input_channels: 4
+    norm_type: instance
+    num_layers: 5
+    type: patchgan
+  enable: true
+  lambda_adv_end: 0.01
+  lambda_adv_start: 0.001
+  lambda_adv_warmup_epochs: 20
+  optimizer:
+    betas:
+    - 0.5
+    - 0.999
+    lr: 0.0002
+  training:
+    d_steps: 1
+    g_steps: 1
+  warmup_epochs: 30
+hdr_processing:
+  adaptive_exposure:
+    enable: false
+    percentile: 0.9
+    target_luminance: 0.18
+  enable_linear_preprocessing: true
+  enable_srgb_linear: false
+  exposure: 0.8
+  gamma: 1.0
+  mulaw_mu: 300.0
+  scale_factor: 1.0
+  tone_mapping_for_display: mulaw
+loss:
+  area_compensation:
+    apply_to:
+    - perceptual
+    - edge
+    - boundary
+    enable: true
+    gamma: 1.0
+    max_scale: 4.0
+    min_frac: 0.05
+  enhanced:
+    color_stats:
+      domain: ldr
+      enable: false
+      epsilon: 1.0e-06
+      use_std: true
+      weight: 0.05
+    local_perceptual:
+      enable: true
+      grid_cols: 4
+      grid_rows: 4
+      hole_threshold_frac: 0.05
+      max_crops_per_patch: 10
+      padding: 8
+      weight: 0.2
+  masking:
+    mask_boundary: true
+    mask_edge: true
+    mask_perceptual: true
+  residual_scale_factor: 1.0
+  robust:
+    enable: false
+    params:
+      delta: 0.2
+      epsilon: 0.003
+    schedule:
+      enabled: false
+      end_epoch: 30
+      start_epoch: 0
+      to: l1
+    type: huber
+  spatial_attention: true
+  type: ResidualInpaintingLoss
+  weight_schedule:
+    color_stats: 0.0
+    enable: false
+    hole_decay_end: 12000
+    hole_p1: 0.5
+    hole_p4: 0.2
+    log_p1: 0.9
+    log_p2: 0.3
+    other_target: 1.0
+    perc_p1: 2.0
+    perc_p2: 8.0
+    phase1_end: 2000
+    phase2_end: 3000
+    phase3_end: 8000
+  weights:
+    boundary: 8.0
+    ctx: 10.0
+    domain: ldr
+    edge: 6.0
+    hole: 20.0
+    hole_ring_kernel: 3
+    hole_ring_scale: 0.5
+    l1: 1.0
+    ldr_for_edge: true
+    ldr_for_pixel: true
+    local_perceptual: 1.0
+    perceptual: 5.0
+memory:
+  enable_ultra_safe_mode: true
+  garbage_collection_frequency: 10
+  max_gpu_memory_gb: 4
+monitoring:
+  model_save_dir: ./models/colleague
+  save_frequency: 10
+  tensorboard_log_dir: ./logs/colleague_training
+network:
+  architecture_details:
+    channel_progression: "64\u219296\u2192128\u2192192\u2192256"
+    decoder_layers: 5
+    encoder_layers: 5
+  base_channels: 24
+  boundary_detection: edge_based
+  input_channels: 7
+  learning_mode: residual
+  output_channels: 3
+  residual_scale_factor: 1.0
+  type: PatchNetwork
+normalization:
+  input_normalization:
+    enable: true
+    max_scale: 512.0
+    method: per_patch_percentile
+    min_scale: 1.0
+    percentile: 0.99
+  log_apply_delta_in_holes: true
+  log_delta_abs_max: 16.0
+  log_delta_alpha: 1.2
+  log_delta_mask_ring_kernel: 3
+  log_delta_mask_ring_scale: 0.5
+  log_delta_scale: 0.9
+  log_dither_enable: true
+  log_dither_scale: 1.0e-06
+  log_epsilon: 1.0e-06
+  log_supervision_enable: true
+  log_supervision_huber_delta: 0.2
+  log_supervision_type: l1
+  log_supervision_weight: 1.0
+  max_scale: 512.0
+  min_scale: 1.0
+  optimizer: AdamW
+  optimizer_params:
+    beta2: 0.98
+    eps: 1.0e-06
+  percentile: 0.99
+  scheduler: CosineAnnealingLR
+  scheduler_params:
+    T_max: 100
+    eta_min: 1.0e-06
+  stats_path: ./configs/hdr_global_stats.json
+  type: log
+patch:
+  augmentation_probability: 0.0
+  cache_size: 1000
+  crop_size: 256
+  crop_stride: 128
+  enable_patch_cache: false
+  enable_patch_mode: true
+  keep_top_frac: 0.5
+  max_patches_per_image: 16
+  min_hole_frac: 0.005
+  min_patches_per_image: 16
+  patch_augmentation: false
+  patch_height: 270
+  patch_mode_probability: 1.0
+  patch_size: 270
+  patch_width: 480
+  simple_expected_height: 1080
+  simple_expected_width: 1920
+  simple_grid_cols: 4
+  simple_grid_rows: 4
+  use_optimized_patches: false
+  use_overlapping_crops: true
+  use_simple_grid_patches: false
+training:
+  accumulate_grad_batches: 2
+  batch_size: 8
+  global_standardization:
+    apply_to_channels: rgb
+    enable: true
+    include_holes: false
+    stats_path: ./configs/hdr_global_stats.json
+  gradient_clip_val: null
+  input_normalization:
+    enable: false
+    max_scale: 512.0
+    method: per_patch_percentile
+    min_scale: 1.0
+    percentile: 0.99
+  learning_rate: 5.0e-05
+  max_epochs: 300
+  num_workers: 4
+  warmup_start_factor: 0.1
+  warmup_steps: 500
+  weight_decay: 0.0001
+validation:
+  frequency: 5
+  metrics:
+  - mse
+  - psnr
+  - ssim
+visualization:
+  grid:
+    max_patches: 8
+    panel_order:
+    - input
+    - target
+    - pred

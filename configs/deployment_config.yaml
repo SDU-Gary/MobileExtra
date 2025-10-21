@@ -1,0 +1,94 @@
+# deployment_config.yaml
+# 部署配置文件
+#
+# 配置说明：
+# - 移动端部署参数和优化设置
+# - 平台特定配置和适配参数
+# - 性能约束和降级策略
+# - 运行时监控和日志设置
+#
+# 部署目标：
+# - Android: API 24+, 主流厂商适配
+# - iOS: iOS 13+, A12+芯片支持
+# - 性能: <8ms总延迟, <200MB GPU显存
+#
+# @author 平台集成团队
+# @date 2025-07-28
+# @version 1.0
+
+# 系统性能约束
+performance_constraints:
+  max_total_latency_ms: 8
+  max_gpu_memory_mb: 200
+  max_system_memory_mb: 150
+  max_network_parameters: 3000000
+  target_fps: 120
+
+# GPU配置
+gpu_config:
+  warp_target_latency_ms: 1  # 关键约束
+  compute_shader_workgroup_size: [16, 16]
+  texture_formats:
+    rgb: "RGBA8"
+    depth: "R32F" 
+    motion_vector: "RG16F"
+  double_buffering: true
+
+# NPU配置
+npu_config:
+  inference_target_latency_ms: 4
+  batch_size: 4
+  patch_size: 64
+  precision: "INT8"
+  memory_pool_size_mb: 100
+
+# 降级策略
+degradation_strategy:
+  temperature_thresholds:
+    warning: 45.0
+    critical: 50.0
+  battery_thresholds:
+    warning: 15.0
+    critical: 10.0
+  utilization_thresholds:
+    npu_limit: 85.0
+    gpu_limit: 90.0
+  
+  degradation_levels:
+    - name: "optimal"
+      extrapolation: true
+      interpolation: true
+      resolution_scale: 1.0
+    - name: "high_performance"  
+      extrapolation: true
+      interpolation: "selective"
+      resolution_scale: 0.875
+    - name: "balanced"
+      extrapolation: "dual_frame"
+      interpolation: false
+      resolution_scale: 0.75
+    - name: "conservative"
+      extrapolation: "single_frame"
+      interpolation: false  
+      resolution_scale: 0.625
+    - name: "emergency"
+      extrapolation: false
+      interpolation: false
+      resolution_scale: 0.5
+
+# 平台适配
+platform_adaptation:
+  auto_detection: true
+  fallback_config: "conservative"
+  config_cache: true
+  runtime_switching: true
+
+# 监控和日志
+monitoring:
+  performance_metrics: true
+  memory_usage: true
+  temperature_monitoring: true
+  crash_reporting: true
+  log_level: "INFO"
+
+# TODO: 完善部署配置的平台特定参数

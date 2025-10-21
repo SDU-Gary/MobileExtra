@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "WebSearch",
+      "Bash(python3:*)",
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(python:*)",
+      "Bash(cat:*)",
+      "Bash(test:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

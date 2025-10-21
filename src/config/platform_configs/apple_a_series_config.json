@@ -1,0 +1,64 @@
+{
+  /**
+   * @file apple_a_series_config.json
+   * @brief 苹果A系列芯片配置文件
+   * 
+   * 配置说明：
+   * - 针对Apple A15/A16/A17芯片优化
+   * - Apple GPU + Neural Engine异构配置
+   * - iOS系统集成和Metal优化
+   * - 热管理和电池优化
+   * 
+   * 支持芯片：
+   * - A17 Pro: 最新旗舰配置
+   * - A16 Bionic: 旗舰配置
+   * - A15 Bionic: 高端配置
+   * - A14 Bionic: 标准配置
+   * 
+   * 优化重点：
+   * - Neural Engine最大化利用
+   * - Apple GPU Metal计算优化
+   * - 统一内存架构优化
+   * - 系统级功耗管理
+   * 
+   * @author 配置管理团队
+   * @date 2025-07-28
+   * @version 1.0
+   */
+  
+  "platform_info": {
+    "chip_vendor": "Apple",
+    "chip_series": "A-Series",
+    "supported_models": ["A17", "A16", "A15", "A14"],
+    "min_ios_version": "15.0"
+  },
+  
+  "performance_config": {
+    "max_gpu_memory_mb": 220,
+    "max_system_memory_mb": 160,
+    "max_network_parameters": 3200000,
+    "target_fps": 120,
+    "max_latency_ms": 7.5
+  },
+  
+  "degradation_thresholds": {
+    "temperature_warning": 42.0,
+    "temperature_critical": 47.0,
+    "battery_warning": 20.0,
+    "battery_critical": 15.0,
+    "neural_engine_utilization_limit": 90.0,
+    "gpu_utilization_limit": 95.0
+  },
+  
+  "optimization_params": {
+    "resolution_scale_factors": [1.0, 0.9, 0.8, 0.7, 0.6],
+    "supported_precisions": ["FP16", "INT8", "INT4"],
+    "supports_compute_shader": true,
+    "preferred_npu_backend": "CoreML",
+    "metal_gpu_family": "Apple7+",
+    "unified_memory_architecture": true,
+    "neural_engine_cores": 16
+  },
+  
+  "TODO": "完善Apple平台的Neural Engine和Metal GPU优化配置"
+}

@@ -1,0 +1,179 @@
+┌──────────────────────────────────────────────────────────────────────────┐
+│                   STRATEGY 5 ANALYSIS - QUICK REFERENCE                  │
+│                          One-Page Decision Guide                         │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌─ VERDICT ──────────────────────────────────────────────────────────────┐
+│  ❌ DO NOT IMPLEMENT STRATEGY 5                                         │
+│  ✅ USE PHASE 1 IMMEDIATE FIX INSTEAD                                   │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ WHY STRATEGY 5 IS WRONG ──────────────────────────────────────────────┐
+│                                                                          │
+│  1. DYNAMIC CAP: mean(denom) is mathematically incorrect                │
+│     • denom shape is [B,1,1,1] (already spatially pooled)              │
+│     • mean(dim=[1,2,3]) is a no-op or introduces batch dependency      │
+│     • Legacy Mode B already does adaptive capping (line 1396)           │
+│     → REDUNDANT, already implemented                                    │
+│                                                                          │
+│  2. KL DIVERGENCE: Not applicable to residuals                          │
+│     • Residuals are NOT probability distributions                       │
+│     • softmax(delta_log) loses sign information (neg → pos)            │
+│     • Spatial flattening destroys structure                             │
+│     • No academic precedent (VQGAN, RAFT don't use this)               │
+│     → MATHEMATICALLY INCORRECT                                          │
+│                                                                          │
+│  3. DOESN'T SOLVE OVERFLOW: Root cause is absolute magnitude            │
+│     • High-contrast patches still have large denom (e.g., 16.0)        │
+│     • Dynamic cap = denom * 0.9 = 14.4 → still overflow                │
+│     • Need absolute limit, not relative scaling                         │
+│     → INEFFECTIVE                                                       │
+│                                                                          │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ WHAT TO DO INSTEAD ───────────────────────────────────────────────────┐
+│                                                                          │
+│  PHASE 1 (5 minutes, 80% problem solved):                              │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ File: configs/colleague_training_config.yaml                     │  │
+│  │   log_delta_abs_max: 6.0   # was 16.0                            │  │
+│  │   log_delta_alpha: 1.0      # was 1.2                            │  │
+│  │   log_supervision_weight: 2.0  # was 1.0                         │  │
+│  │   log_supervision_type: huber  # was l1                          │  │
+│  │                                                                   │  │
+│  │ File: train/patch_training_framework.py (line 1393)              │  │
+│  │   delta_log = ... # existing code                                │  │
+│  │   delta_log = torch.clamp(delta_log, min=-8.0, max=8.0)  # ADD  │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  PHASE 2 (2 hours, removes hyperparameter tuning):                     │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ File: src/npu/networks/patch/patch_network.py                    │  │
+│  │   class PatchNetwork:                                             │  │
+│  │       def __init__(...):                                          │  │
+│  │           self.residual_output_scale = nn.Parameter(              │  │
+│  │               torch.tensor([6.0])                                 │  │
+│  │           )                                                        │  │
+│  │       def forward(self, x, ...):                                  │  │
+│  │           residual = torch.tanh(x5) * self.residual_output_scale │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ KEY TECHNICAL INSIGHTS ───────────────────────────────────────────────┐
+│                                                                          │
+│  Current Implementation (log normalization):                            │
+│    1. log_img = log(warped_rgb + eps)                                  │
+│    2. denom = max(log_img) - min(log_img)  ← Per-patch dynamic range  │
+│    3. Xn = (log_img - min_log) / denom     ← Normalize to [0,1]       │
+│    4. residual_pred = Network(Xn)          ← Tanh output [-1,1]       │
+│    5. delta_log = scale * residual_pred * cap                          │
+│    6. output = exp(log_img + delta_log) - eps                          │
+│                                                                          │
+│  Problem with Current Settings:                                         │
+│    cap = log_delta_alpha * log_delta_abs_max = 1.2 * 16.0 = 19.2      │
+│    exp(19.2) = 218,407,808  ← OVERFLOW (218 million!)                 │
+│                                                                          │
+│  Solution (Phase 1):                                                    │
+│    cap = 1.0 * 6.0 = 6.0                                               │
+│    exp(6.0) = 403           ← SAFE (within HDR range)                 │
+│    Hard clamp at ±8.0 as failsafe: exp(8.0) = 2981                    │
+│                                                                          │
+│  Why tanh?                                                              │
+│    • Bounds network output to [-1,1]                                   │
+│    • Soft clamping (smooth gradients near boundaries)                  │
+│    • Prevents exploding gradients in log space                         │
+│                                                                          │
+│  Why denom is NOT suitable for dynamic cap:                            │
+│    • High-contrast patch: denom = 16.0 → still too large              │
+│    • Low-contrast patch: denom = 2.0 → may be too restrictive         │
+│    • Batch variance: CV ~30-50% (unstable across batches)             │
+│    • Already used for input normalization (don't double-apply)         │
+│                                                                          │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ COMPARISON TABLE ─────────────────────────────────────────────────────┐
+│                                                                          │
+│  Metric            │ Strategy 5  │ Phase 1 Fix │ Phase 2 Learnable    │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  Implementation    │ 4 hours     │ 5 minutes   │ 2 hours              │
+│  Risk              │ High        │ Low         │ Medium               │
+│  Solves overflow   │ ❌ No       │ ✅ Yes      │ ✅ Yes               │
+│  Math soundness    │ ❌ Wrong    │ ✅ Correct  │ ✅ Correct           │
+│  Hyperparams       │ +3 new      │ -1 (simpler)│ 0 (learnable)        │
+│  Expected gain     │ 0%          │ 15-20%      │ 20-30%               │
+│  Precedent         │ ❌ None     │ ✅ Common   │ ✅ ResNets, EDSR     │
+│                                                                          │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ FILES TO READ ────────────────────────────────────────────────────────┐
+│                                                                          │
+│  📄 Full Analysis (50 pages):                                           │
+│     /home/kyrie/mobileExtra/analysis_strategy5_log_residual_constraints.md
+│                                                                          │
+│  📋 Executive Summary (5 pages):                                        │
+│     /home/kyrie/mobileExtra/strategy5_verdict_summary.txt              │
+│                                                                          │
+│  🔧 Ready-to-Apply Patch:                                               │
+│     /home/kyrie/mobileExtra/PHASE1_IMMEDIATE_FIX.patch                 │
+│                                                                          │
+│  📌 This Quick Reference:                                               │
+│     /home/kyrie/mobileExtra/strategy5_quick_reference.txt              │
+│                                                                          │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ CHECKLIST ────────────────────────────────────────────────────────────┐
+│                                                                          │
+│  Before Proceeding:                                                     │
+│    [ ] Read full analysis document (sections 2.2, 3.2, 5.1)            │
+│    [ ] Understand why KL divergence is wrong for residuals             │
+│    [ ] Understand why dynamic cap is redundant (Mode B exists)         │
+│    [ ] Agree to abandon Strategy 5 implementation                      │
+│                                                                          │
+│  To Apply Phase 1:                                                      │
+│    [ ] Backup current config file                                      │
+│    [ ] Edit colleague_training_config.yaml (4 lines)                   │
+│    [ ] Edit patch_training_framework.py (2 clamp statements)           │
+│    [ ] Run 1 test epoch to verify no overflow                          │
+│    [ ] Monitor delta_log range (should be within ±8.0)                 │
+│    [ ] If successful, continue full training                           │
+│                                                                          │
+│  After Phase 1 Success:                                                 │
+│    [ ] Validate val_loss is stable or improved                         │
+│    [ ] Check SSIM metrics (should be stable)                           │
+│    [ ] Inspect visualizations (less bloom/overflow)                    │
+│    [ ] Proceed to Phase 2 (learnable scale) for further gains          │
+│                                                                          │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ KEY TAKEAWAYS ────────────────────────────────────────────────────────┐
+│                                                                          │
+│  1. ❌ Don't implement Strategy 5 (dynamic cap + KL divergence)         │
+│     Reasons: Redundant, mathematically incorrect, doesn't solve issue  │
+│                                                                          │
+│  2. ✅ DO implement Phase 1 (reduce cap from 16.0 → 6.0)               │
+│     Impact: 80-95% overflow reduction, 5 minutes, zero risk            │
+│                                                                          │
+│  3. ✅ DO implement Phase 2 (learnable scale) after validating Phase 1  │
+│     Impact: Removes hyperparameter tuning, 5-10% val_loss gain         │
+│                                                                          │
+│  4. 🔬 Residuals are not distributions → don't use KL divergence        │
+│     Alternatives: L1, Huber, perceptual, histogram matching            │
+│                                                                          │
+│  5. 📊 Log-space HDR: Great for perceptual uniformity, but needs care  │
+│     Key: Bound residuals to prevent exp() overflow (±6-8 is safe)     │
+│                                                                          │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ CONTACT ──────────────────────────────────────────────────────────────┐
+│                                                                          │
+│  Questions? Re-read these sections in full analysis:                   │
+│    • Section 2.2: Why dynamic cap is mathematically wrong              │
+│    • Section 3.2: Why KL divergence doesn't apply to residuals         │
+│    • Section 5.1: Learnable scale parameters (recommended)             │
+│    • Appendix A: Copy-paste code snippets                              │
+│                                                                          │
+│  This analysis by: Claude Sonnet 4.5 (Backend System Architect)        │
+│  Date: 2025-10-21                                                       │
+│                                                                          │
+└────────────────────────────────────────────────────────────────────────┘

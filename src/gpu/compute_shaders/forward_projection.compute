@@ -1,0 +1,32 @@
+/**
+ * @file forward_projection.compute
+ * @brief 前向投影计算着色器
+ * 
+ * 功能描述：
+ * - 基于运动矢量进行像素前向投影
+ * - 融合当前帧和上一帧MV信息提高精度
+ * - 使用原子操作解决像素冲突
+ * - 实现最近帧优先原则
+ * 
+ * 算法流程：
+ * 1. 读取当前像素的RGB、深度、MV数据
+ * 2. 融合双帧MV计算目标投影位置
+ * 3. 执行原子深度测试
+ * 4. 成功时写入颜色和深度信息
+ * 5. 计算和存储投影残差
+ * 
+ * 性能关键：
+ * - 工作组大小: 16x16
+ * - 内存访问: 合并访问优化
+ * - 原子操作: 最小化冲突
+ * 
+ * @author GPU计算团队
+ * @date 2025-07-28
+ * @version 1.0
+ */
+
+#version 310 es
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// TODO: 实现前向投影算法
+// 参考design.md中的forward_projection.compute实现
