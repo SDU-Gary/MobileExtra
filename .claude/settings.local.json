@@ -7,7 +7,8 @@
       "mcp__sequential-thinking__sequentialthinking",
       "Bash(python:*)",
       "Bash(cat:*)",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []

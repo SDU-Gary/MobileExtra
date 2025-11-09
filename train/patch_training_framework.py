@@ -25,6 +25,12 @@ import logging
 from dataclasses import dataclass
 from torch.nn.functional import smooth_l1_loss
 
+try:
+    import ptwt  # type: ignore
+    PTWT_AVAILABLE = True
+except ImportError:
+    PTWT_AVAILABLE = False
+
 class PerceptualLoss(nn.Module):
     """简化版感知损失：优先使用VGG16，失败时退化为SSIM。"""
 
@@ -266,7 +272,8 @@ class PatchAwareLoss(nn.Module):
                  robust_config: Optional[Dict[str, Any]] = None,
                  hdr_vis_config: Optional[Dict[str, Any]] = None,
                  weights_config: Optional[Dict[str, Any]] = None,
-                 masking_config: Optional[Dict[str, Any]] = None):
+                 masking_config: Optional[Dict[str, Any]] = None,
+                 wavelet_config: Optional[Dict[str, Any]] = None):
         super(PatchAwareLoss, self).__init__()
         
         # 损失权重
@@ -365,6 +372,19 @@ class PatchAwareLoss(nn.Module):
         self.local_perc_padding = int(lp.get('padding', 8))  # 像素
         self.local_perc_max_crops = int(lp.get('max_crops_per_patch', 6))
 
+        # Wavelet 频域损失配置
+        wave_cfg = wavelet_config or {}
+        self.wavelet_enabled = bool(wave_cfg.get('enable', False))
+        self.wavelet_type = str(wave_cfg.get('wavelet_type', 'haar'))
+        self.wavelet_level = int(wave_cfg.get('level', 1))
+        self.wavelet_low_freq_weight = float(wave_cfg.get('low_freq_weight', 1.0))
+        self.wavelet_high_freq_weight = float(wave_cfg.get('high_freq_weight', 0.5))
+        # Loss weight优先从 weights_config 获取，否则 fallback wave_cfg.weight
+        self.w_wavelet = float((weights_config or {}).get('wavelet', wave_cfg.get('weight', 0.0)))
+        if self.wavelet_enabled and not PTWT_AVAILABLE:
+            print("[WARN] Wavelet loss enabled but ptwt not available. Disabling wavelet loss.")
+            self.wavelet_enabled = False
+
     def _robust_masked_loss(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """鲁棒/非鲁棒的掩码像素平均损失。
 
@@ -417,7 +437,39 @@ class PatchAwareLoss(nn.Module):
             adaptive_exposure=self.adaptive_exposure_cfg,
             mu=self.mulaw_mu,
         )
-        
+    
+    def _compute_wavelet_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if not self.wavelet_enabled or not PTWT_AVAILABLE or self.w_wavelet <= 0.0:
+            return torch.tensor(0.0, device=pred.device)
+
+        try:
+            pred_low, pred_high = ptwt.wavedec2(
+                pred,
+                wavelet=self.wavelet_type,
+                level=self.wavelet_level,
+                mode='reflect'
+            )
+            tgt_low, tgt_high = ptwt.wavedec2(
+                target,
+                wavelet=self.wavelet_type,
+                level=self.wavelet_level,
+                mode='reflect'
+            )
+
+            loss_low = self.l1_loss(pred_low, tgt_low)
+            loss_high = 0.0
+            for pred_band, tgt_band in zip(pred_high, tgt_high):
+                loss_high += self.l1_loss(pred_band, tgt_band)
+
+            total_wavelet_loss = (
+                self.wavelet_low_freq_weight * loss_low +
+                self.wavelet_high_freq_weight * loss_high
+            )
+            return total_wavelet_loss
+        except Exception as e:
+            print(f"[WARN] Wavelet loss computation failed: {e}")
+            return torch.tensor(0.0, device=pred.device)
+
     def _create_boundary_kernel(self) -> torch.Tensor:
         """创建边界检测卷积核"""
         kernel = torch.tensor([
@@ -698,7 +750,12 @@ class PatchAwareLoss(nn.Module):
                 if den_acc > 0.0 and num_acc is not None:
                     local_perc_loss = num_acc / den_acc
                 losses['patch_local_perceptual'] = local_perc_loss
-            
+
+            wavelet_loss = torch.tensor(0.0, device=patch_pred.device)
+            if self.wavelet_enabled and self.w_wavelet > 0.0:
+                wavelet_loss = self._compute_wavelet_loss(patch_pred, patch_target)
+                losses['wavelet'] = wavelet_loss
+
             # Patch 总损失：基础像素项 + 各类掩码化损失
             patch_total = (
                 self.w_l1 * patch_l1 +
@@ -708,7 +765,8 @@ class PatchAwareLoss(nn.Module):
                 self.w_hole * hole_l1 +
                 self.w_ctx * ctx_preserve +
                 self.w_color_stats * color_stats_loss +
-                self.w_local_perc * local_perc_loss
+                self.w_local_perc * local_perc_loss +
+                self.w_wavelet * wavelet_loss
             )
             patch_total = torch.nan_to_num(patch_total, nan=0.0, posinf=1e6, neginf=0.0)
             total_loss += weights['patch'] * patch_total
@@ -959,11 +1017,13 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         hdr_vis_cfg = (full_config or {}).get('hdr_processing', {}) if full_config else {}
         weights_cfg = (full_config or {}).get('loss', {}).get('weights', {}) if full_config else {}
         masking_cfg = (full_config or {}).get('loss', {}).get('masking', {}) if full_config else {}
+        wavelet_cfg = (full_config or {}).get('loss', {}).get('wavelet', {}) if full_config else {}
         self.patch_loss = PatchAwareLoss(
             robust_config=robust_cfg,
             hdr_vis_config=hdr_vis_cfg,
             weights_config=weights_cfg,
             masking_config=masking_cfg,
+            wavelet_config=wavelet_cfg,
         )
 
         # 梯度范数监控参数

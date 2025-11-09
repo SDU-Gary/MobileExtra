@@ -113,6 +113,13 @@ loss:
     ldr_for_pixel: true
     local_perceptual: 1.0
     perceptual: 5.0
+    wavelet: 1.0  # Wavelet loss weight (0 = disabled)
+  wavelet:
+    enable: true  # Enable wavelet frequency decomposition loss
+    wavelet_type: haar  # Wavelet type: haar, db1, db2, etc.
+    level: 1  # Decomposition level
+    low_freq_weight: 1.0  # Weight for low-frequency (structure) loss
+    high_freq_weight: 0.5  # Weight for high-frequency (detail) loss
 memory:
   enable_ultra_safe_mode: true
   garbage_collection_frequency: 10
@@ -189,6 +196,10 @@ patch:
   use_optimized_patches: false
   use_overlapping_crops: true
   use_simple_grid_patches: false
+  # Multi-scale sampling configuration
+  enable_multiscale: true
+  multiscale_factors: [0.75, 1.0, 1.25]
+  multiscale_base_size: 128
 training:
   accumulate_grad_batches: 2
   batch_size: 8

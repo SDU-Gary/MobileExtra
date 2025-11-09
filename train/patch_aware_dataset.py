@@ -66,37 +66,47 @@ class PatchTrainingConfig:
     enable_patch_mode: bool = True
     patch_size: int = 128
     patch_mode_probability: float = 0.7
-    
+
     min_patches_per_image: int = 1
     max_patches_per_image: int = 8
     patch_overlap_threshold: float = 0.3
-    
+
     enable_patch_cache: bool = True
     cache_size: int = 1000
     cache_hit_threshold: float = 0.8
-    
+
     patch_augmentation: bool = True
     augmentation_probability: float = 0.5
-    
+
     min_hole_area: int = 100
     max_hole_area: int = 10000
     boundary_margin: int = 16
-    
+
     #  Patch extraction strategy configuration
     use_optimized_patches: bool = True      # Enable optimized patch system
     use_simple_grid_patches: bool = False   #  NEW: Use simple 4x4 grid strategy (most stable)
-    
+
     # Optimized patch configuration (used when use_simple_grid_patches=False)
     optimized_tight_fitting: bool = True    # Enable tight fitting (5% oversizing)
     optimized_shape_analysis: bool = True   # Enable shape-aware patches
     optimized_waste_limit: float = 0.35     # Max 35% background waste
     optimized_coverage_target: float = 0.92 # Target 92% hole coverage
-    
+
     #  Simple grid patch configuration (used when use_simple_grid_patches=True)
     simple_grid_rows: int = 4               # Grid rows (short side)
     simple_grid_cols: int = 4               # Grid columns (long side)
     simple_expected_height: int = 1080      # Expected input image height
     simple_expected_width: int = 1920       # Expected input image width
+
+    # Multi-scale sampling configuration
+    enable_multiscale: bool = False         # Enable multi-scale sampling
+    multiscale_factors: List[float] = None  # Scale factors [0.75, 1.0, 1.25]
+    multiscale_base_size: int = 128         # Base patch size for multi-scale
+
+    def __post_init__(self):
+        """Initialize default multiscale factors if not provided"""
+        if self.multiscale_factors is None:
+            self.multiscale_factors = [0.75, 1.0, 1.25]
 
 
 @dataclass
@@ -381,22 +391,44 @@ class PatchAwareDataset(Dataset):
         for i, (input_patch, residual_patch, rgb_patch, position) in enumerate(zip(
             input_patches, target_residual_patches, target_rgb_patches, input_positions
         )):
-            # Convert to tensors and ensure correct shape [C, H, W]
-            patch_input_tensor = torch.from_numpy(input_patch).float()                    # [7, patch_h, patch_w]
-            patch_target_residual_tensor = torch.from_numpy(residual_patch).float()      # [3, patch_h, patch_w]  
-            patch_target_rgb_tensor = torch.from_numpy(rgb_patch).float()                # [3, patch_h, patch_w]
-            
-            # Resize to standard patch size (128x128) if needed
-            if patch_input_tensor.shape[1] != 128 or patch_input_tensor.shape[2] != 128:
-                patch_input_tensor = torch.nn.functional.interpolate(
-                    patch_input_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
-                ).squeeze(0)
-                patch_target_residual_tensor = torch.nn.functional.interpolate(
-                    patch_target_residual_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
-                ).squeeze(0)
-                patch_target_rgb_tensor = torch.nn.functional.interpolate(
-                    patch_target_rgb_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
-                ).squeeze(0)
+            # Multi-scale sampling: re-crop from original image with different scales
+            if self.config.enable_multiscale:
+                # Calculate patch center from position
+                center_x = position.x + position.width // 2
+                center_y = position.y + position.height // 2
+
+                # Extract multi-scale patches from original images
+                multiscale_input = self._extract_multiscale_patch(
+                    input_numpy, center_x, center_y, base_size=128
+                )
+                multiscale_residual = self._extract_multiscale_patch(
+                    target_residual_numpy, center_x, center_y, base_size=128
+                )
+                multiscale_rgb = self._extract_multiscale_patch(
+                    target_rgb_numpy, center_x, center_y, base_size=128
+                )
+
+                # Convert to tensors (already in [C, 128, 128] format)
+                patch_input_tensor = torch.from_numpy(multiscale_input).float()
+                patch_target_residual_tensor = torch.from_numpy(multiscale_residual).float()
+                patch_target_rgb_tensor = torch.from_numpy(multiscale_rgb).float()
+            else:
+                # Standard processing: use extracted patches
+                patch_input_tensor = torch.from_numpy(input_patch).float()                    # [7, patch_h, patch_w]
+                patch_target_residual_tensor = torch.from_numpy(residual_patch).float()      # [3, patch_h, patch_w]
+                patch_target_rgb_tensor = torch.from_numpy(rgb_patch).float()                # [3, patch_h, patch_w]
+
+                # Resize to standard patch size (128x128) if needed
+                if patch_input_tensor.shape[1] != 128 or patch_input_tensor.shape[2] != 128:
+                    patch_input_tensor = torch.nn.functional.interpolate(
+                        patch_input_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
+                    ).squeeze(0)
+                    patch_target_residual_tensor = torch.nn.functional.interpolate(
+                        patch_target_residual_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
+                    ).squeeze(0)
+                    patch_target_rgb_tensor = torch.nn.functional.interpolate(
+                        patch_target_rgb_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
+                    ).squeeze(0)
             
             patches_input.append(patch_input_tensor)
             patches_target_residual.append(patch_target_residual_tensor)
@@ -499,21 +531,52 @@ class PatchAwareDataset(Dataset):
                 })
                 self.stats['cache_hits'] += 1
             else:
-                # Extract new patch -  残差学习: 同时提取残差和RGB patches
-                input_patches, input_positions = self.patch_extractor.extract_patches(
-                    input_data.numpy(), [patch_info]
-                )
-                target_residual_patches, _ = self.patch_extractor.extract_patches(
-                    target_residual.numpy(), [patch_info]
-                )
-                target_rgb_patches, _ = self.patch_extractor.extract_patches(
-                    target_rgb.numpy(), [patch_info]
-                )
-                
-                if len(input_patches) > 0 and len(target_residual_patches) > 0 and len(target_rgb_patches) > 0:
+                # Multi-scale sampling: extract patches with different scales
+                if self.config.enable_multiscale:
+                    # Use patch center for multi-scale extraction
+                    multiscale_input = self._extract_multiscale_patch(
+                        input_data.numpy(), patch_info.center_x, patch_info.center_y, base_size=128
+                    )
+                    multiscale_residual = self._extract_multiscale_patch(
+                        target_residual.numpy(), patch_info.center_x, patch_info.center_y, base_size=128
+                    )
+                    multiscale_rgb = self._extract_multiscale_patch(
+                        target_rgb.numpy(), patch_info.center_x, patch_info.center_y, base_size=128
+                    )
+
+                    # Convert to tensors (already in [C, 128, 128] format)
+                    patch_input_tensor = torch.from_numpy(multiscale_input).float()
+                    patch_target_residual_tensor = torch.from_numpy(multiscale_residual).float()
+                    patch_target_rgb_tensor = torch.from_numpy(multiscale_rgb).float()
+
+                    # Create dummy position for metadata
+                    from src.npu.networks.patch.patch_extractor import PatchPosition
+                    input_position = PatchPosition(
+                        x=patch_info.center_x - 64, y=patch_info.center_y - 64,
+                        width=128, height=128
+                    )
+                else:
+                    # Standard extraction: use patch extractor
+                    input_patches, input_positions = self.patch_extractor.extract_patches(
+                        input_data.numpy(), [patch_info]
+                    )
+                    target_residual_patches, _ = self.patch_extractor.extract_patches(
+                        target_residual.numpy(), [patch_info]
+                    )
+                    target_rgb_patches, _ = self.patch_extractor.extract_patches(
+                        target_rgb.numpy(), [patch_info]
+                    )
+
+                    if len(input_patches) == 0 or len(target_residual_patches) == 0 or len(target_rgb_patches) == 0:
+                        continue  # Skip this patch
+
                     patch_input_tensor = torch.from_numpy(input_patches[0])           # [7, 128, 128]
                     patch_target_residual_tensor = torch.from_numpy(target_residual_patches[0])  # [3, 128, 128]
                     patch_target_rgb_tensor = torch.from_numpy(target_rgb_patches[0])           # [3, 128, 128]
+                    input_position = input_positions[0]
+
+                # Common processing for both multi-scale and standard modes
+                if patch_input_tensor is not None:
                     
                     # Apply augmentation if enabled
                     # Note: augmentation disabled to avoid cache mapping issues
@@ -533,7 +596,7 @@ class PatchAwareDataset(Dataset):
                     #  Calculate efficiency for optimized patches
                     patch_metadata = {
                         'patch_info': patch_info,
-                        'position': input_positions[0],
+                        'position': input_position,
                         'hole_area': patch_info.hole_area,
                         'from_cache': False
                     }
@@ -653,7 +716,58 @@ class PatchAwareDataset(Dataset):
             }
         }
     
-    
+    def _extract_multiscale_patch(self, image_numpy: np.ndarray, center_x: int, center_y: int,
+                                  base_size: int = 128) -> np.ndarray:
+        """Extract multi-scale patch from image
+
+        Args:
+            image_numpy: Original image [C, H, W] in numpy format
+            center_x: Patch center x coordinate
+            center_y: Patch center y coordinate
+            base_size: Target patch size (default: 128)
+
+        Returns:
+            patch: Resized patch [C, base_size, base_size] in numpy format
+        """
+        if not self.config.enable_multiscale:
+            # No multi-scale: standard crop
+            scale = 1.0
+        else:
+            # Randomly select scale factor
+            scale = random.choice(self.config.multiscale_factors)
+
+        # Calculate crop size based on scale
+        # scale=0.75 → crop_size=171 (larger area, more context)
+        # scale=1.0  → crop_size=128 (standard)
+        # scale=1.25 → crop_size=102 (smaller area, more detail)
+        crop_size = int(base_size / scale)
+
+        # Calculate crop boundaries
+        C, H, W = image_numpy.shape
+        y1 = max(0, center_y - crop_size // 2)
+        x1 = max(0, center_x - crop_size // 2)
+        y2 = min(H, y1 + crop_size)
+        x2 = min(W, x1 + crop_size)
+
+        # Handle edge cases where crop might be smaller than crop_size
+        actual_h = y2 - y1
+        actual_w = x2 - x1
+
+        # Crop the patch
+        patch = image_numpy[:, y1:y2, x1:x2]  # [C, actual_h, actual_w]
+
+        # Resize to target base_size using torch.nn.functional
+        patch_tensor = torch.from_numpy(patch).float()
+        patch_resized = torch.nn.functional.interpolate(
+            patch_tensor.unsqueeze(0),
+            size=(base_size, base_size),
+            mode='bilinear',
+            align_corners=False
+        ).squeeze(0)  # [C, base_size, base_size]
+
+        # Convert back to numpy
+        return patch_resized.numpy()
+
     def _apply_patch_augmentation(self, patch_input: torch.Tensor, patch_target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply patch-level data augmentation
         

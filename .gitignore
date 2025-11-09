@@ -32,6 +32,8 @@ logs/
 data/
 models/
 
+CLAUDE.md
+
 # TensorBoard & profiler outputs
 events.out.tfevents.*
 lightning_logs/

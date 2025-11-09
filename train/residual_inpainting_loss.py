@@ -11,6 +11,13 @@ from typing import Dict, Tuple, Optional
 import numpy as np
 import torchvision.models as models
 
+# Wavelet transform (optional dependency)
+try:
+    import ptwt
+    PTWT_AVAILABLE = True
+except ImportError:
+    PTWT_AVAILABLE = False
+
 
 class VGGFeatureExtractor(nn.Module):
     """VGG16-based feature extractor for perceptual loss."""
@@ -103,7 +110,26 @@ class ResidualInpaintingLoss(nn.Module):
             print(f"[WARN] VGG init failed, fallback to SSIM: {e}")
             self.vgg_available = False
             self.register_buffer('ssim_window', self._create_ssim_window(11, 3))
-        
+
+        # Wavelet loss configuration
+        self.wavelet_enabled = False
+        self.wavelet_type = 'haar'
+        self.wavelet_level = 1
+        self.wavelet_low_freq_weight = 1.0
+        self.wavelet_high_freq_weight = 0.5
+
+        if config:
+            wavelet_config = config.get('loss', {}).get('wavelet', {})
+            self.wavelet_enabled = wavelet_config.get('enable', False) and PTWT_AVAILABLE
+            self.wavelet_type = wavelet_config.get('wavelet_type', 'haar')
+            self.wavelet_level = wavelet_config.get('level', 1)
+            self.wavelet_low_freq_weight = wavelet_config.get('low_freq_weight', 1.0)
+            self.wavelet_high_freq_weight = wavelet_config.get('high_freq_weight', 0.5)
+
+        if self.wavelet_enabled and not PTWT_AVAILABLE:
+            print("[WARN] Wavelet loss enabled but ptwt not available. Disabling wavelet loss.")
+            self.wavelet_enabled = False
+
         # Device setup
         self.to(device)
     
@@ -234,22 +260,72 @@ class ResidualInpaintingLoss(nn.Module):
             print(f"[WARN] VGG failed, SSIM fallback: {e}")
             return self._compute_ssim_loss(predicted_output, target)
     
+    def _compute_wavelet_loss(self, predicted_output: torch.Tensor,
+                             target: torch.Tensor) -> torch.Tensor:
+        """Wavelet frequency decomposition loss.
+
+        Decomposes images into low-frequency (structure) and high-frequency (detail)
+        components and computes separate losses for each.
+
+        **Training-only**: Not used during inference (zero inference overhead).
+        """
+        if not self.wavelet_enabled or not PTWT_AVAILABLE:
+            return torch.tensor(0.0, device=predicted_output.device)
+
+        try:
+            # Wavelet decomposition
+            # Returns: (low_freq, [high_freq_bands])
+            # For level=1: low_freq is (B,C,H/2,W/2), high_freq_bands is [(LH, HL, HH)]
+            pred_low, pred_high = ptwt.wavedec2(
+                predicted_output,
+                wavelet=self.wavelet_type,
+                level=self.wavelet_level,
+                mode='reflect'
+            )
+            target_low, target_high = ptwt.wavedec2(
+                target,
+                wavelet=self.wavelet_type,
+                level=self.wavelet_level,
+                mode='reflect'
+            )
+
+            # Low-frequency loss (structure)
+            loss_low = self.l1_loss(pred_low, target_low)
+
+            # High-frequency loss (details)
+            # pred_high and target_high are tuples of (LH, HL, HH) bands
+            loss_high = 0.0
+            for pred_band, target_band in zip(pred_high, target_high):
+                loss_high += self.l1_loss(pred_band, target_band)
+
+            # Weighted combination
+            total_wavelet_loss = (
+                self.wavelet_low_freq_weight * loss_low +
+                self.wavelet_high_freq_weight * loss_high
+            )
+
+            return total_wavelet_loss
+
+        except Exception as e:
+            print(f"[WARN] Wavelet loss computation failed: {e}")
+            return torch.tensor(0.0, device=predicted_output.device)
+
     def _compute_attention_supervision_loss(self, network_attention: torch.Tensor,
                                           input_data: torch.Tensor) -> torch.Tensor:
         """Attention sparsity supervision loss."""
         # Target attention from masks
         holes_mask = input_data[:, 3:4, :, :]
         occlusion_mask = input_data[:, 4:5, :, :]
-        
+
         # Combine repair regions
         target_attention = torch.clamp(holes_mask + occlusion_mask, 0.0, 1.0)
-        
+
         # L1 supervision
         attention_l1 = self.l1_loss(network_attention, target_attention)
-        
+
         # Sparsity regularization
         sparsity_loss = torch.mean(network_attention)  # Sparsity penalty
-        
+
         # Combined attention loss
         return attention_l1 + 0.1 * sparsity_loss
     
@@ -330,7 +406,14 @@ class ResidualInpaintingLoss(nn.Module):
             loss_dict['attention_supervision'] = attention_supervision.item()
         else:
             loss_dict['attention_supervision'] = 0.0
-        
+
+        # 8. Wavelet loss (training-only, zero inference overhead)
+        wavelet_loss = self._compute_wavelet_loss(predicted_output, target)
+        loss_dict['wavelet'] = wavelet_loss.item()
+
+        # Get wavelet weight from config (defaults to 0.0 if not set)
+        wavelet_weight = self.loss_weights.get('wavelet', 0.0)
+
         # Total weighted loss
         total_loss = (
             self.loss_weights['residual_mse'] * residual_mse +
@@ -339,7 +422,8 @@ class ResidualInpaintingLoss(nn.Module):
             self.loss_weights['preservation'] * preservation +
             self.loss_weights['edge_preservation'] * edge_preservation +
             self.loss_weights['perceptual'] * perceptual +
-            self.loss_weights['attention_supervision'] * attention_supervision
+            self.loss_weights['attention_supervision'] * attention_supervision +
+            wavelet_weight * wavelet_loss
         )
         
         loss_dict['total'] = total_loss.item()
