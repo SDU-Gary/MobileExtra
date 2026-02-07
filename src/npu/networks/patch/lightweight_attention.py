@@ -97,32 +97,15 @@ class SeparableAttention2D(nn.Module):
         self.channels = channels
         self.hidden_dim = max(channels // reduction_ratio, 8)
         
-        # 水平方向注意力 (H维度)
-        self.h_attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d((None, 1)),  # [B, C, H, 1]
-            nn.Conv2d(channels, self.hidden_dim, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(self.hidden_dim, channels, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # 垂直方向注意力 (W维度)
-        self.w_attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, None)),  # [B, C, 1, W]
-            nn.Conv2d(channels, self.hidden_dim, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(self.hidden_dim, channels, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # 通道注意力
-        self.c_attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),  # [B, C, 1, 1]
-            nn.Conv2d(channels, self.hidden_dim, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(self.hidden_dim, channels, kernel_size=1),
-            nn.Sigmoid()
-        )
+        # H/W/C 注意力改为均值池化以避免 AdaptiveAvgPool2d(None,1) 的 ONNX 限制
+        self.h_conv1 = nn.Conv2d(channels, self.hidden_dim, kernel_size=1)
+        self.h_conv2 = nn.Conv2d(self.hidden_dim, channels, kernel_size=1)
+
+        self.w_conv1 = nn.Conv2d(channels, self.hidden_dim, kernel_size=1)
+        self.w_conv2 = nn.Conv2d(self.hidden_dim, channels, kernel_size=1)
+
+        self.c_conv1 = nn.Conv2d(channels, self.hidden_dim, kernel_size=1)
+        self.c_conv2 = nn.Conv2d(self.hidden_dim, channels, kernel_size=1)
         
         # 特征融合权重
         self.fusion_weight = nn.Parameter(torch.ones(3) / 3.0)
@@ -134,11 +117,16 @@ class SeparableAttention2D(nn.Module):
         Returns:
             attention weighted features: [B, C, H, W]
         """
-        # 计算三个方向的注意力
-        h_att = self.h_attention(x)  # [B, C, H, 1]
-        w_att = self.w_attention(x)  # [B, C, 1, W]
-        c_att = self.c_attention(x)  # [B, C, 1, 1]
-        
+        # 计算三个方向的注意力 (均值池化替代自适应池化，ONNX 友好)
+        h_pool = x.mean(dim=3, keepdim=True)  # [B, C, H, 1]
+        h_att = torch.sigmoid(self.h_conv2(F.relu(self.h_conv1(h_pool))))
+
+        w_pool = x.mean(dim=2, keepdim=True)  # [B, C, 1, W]
+        w_att = torch.sigmoid(self.w_conv2(F.relu(self.w_conv1(w_pool))))
+
+        c_pool = x.mean(dim=(2, 3), keepdim=True)  # [B, C, 1, 1]
+        c_att = torch.sigmoid(self.c_conv2(F.relu(self.c_conv1(c_pool))))
+
         # 应用注意力权重
         h_weighted = x * h_att
         w_weighted = x * w_att  
@@ -225,24 +213,24 @@ class LightweightSelfAttention(nn.Module):
     - 移动端友好设计
     """
     
-    def __init__(self, channels: int, enable_position_encoding: bool = True):
+    def __init__(self, channels: int, enable_position_encoding: bool = False):
         super().__init__()
         self.channels = channels
         self.enable_position_encoding = enable_position_encoding
-        
-        # 位置编码
-        if enable_position_encoding:
-            self.pos_encoding = PositionalEncoding2D(channels)
-        
+
+        # Position Encoding removed for performance (CNN has implicit positional bias)
+        # if enable_position_encoding:
+        #     self.pos_encoding = PositionalEncoding2D(channels)
+
         # 通道分组数
         self.num_groups = max(channels // 16, 1)
         self.channels_per_group = channels // self.num_groups
-        
+
         # 可分离注意力（主要的全局建模组件）
         self.separable_attention = SeparableAttention2D(channels, reduction_ratio=8)
-        
-        # 分层空间注意力（多尺度全局依赖）
-        self.hierarchical_attention = HierarchicalSpatialAttention(channels, scales=[32, 16, 8])
+
+        # HierarchicalSpatialAttention removed for performance (U-Net skip connections provide global info)
+        # self.hierarchical_attention = HierarchicalSpatialAttention(channels, scales=[32, 16, 8])
         
         # 特征融合层
         self.feature_fusion = nn.Sequential(
@@ -269,28 +257,27 @@ class LightweightSelfAttention(nn.Module):
         """
         identity = x
         B, C, H, W = x.shape
-        
-        # 1. 位置编码
-        if self.enable_position_encoding:
-            x = self.pos_encoding(x)
-        
-        # 2. 可分离注意力（主要全局建模）
+
+        # Position encoding removed (Phase 1 optimization)
+        # if self.enable_position_encoding:
+        #     x = self.pos_encoding(x)
+
+        # 1. 可分离注意力（主要全局建模）
         separable_out = self.separable_attention(x)
-        
-        # 3. 分层空间注意力（多尺度全局依赖）
-        hierarchical_out = self.hierarchical_attention(x)
-        
-        # 4. 特征融合
-        combined_features = separable_out + hierarchical_out
-        fused_features = self.feature_fusion(combined_features)
-        
-        # 5. 输出门控
+
+        # HierarchicalSpatialAttention removed (Phase 1 optimization)
+        # hierarchical_out = self.hierarchical_attention(x)
+
+        # 2. 特征融合（简化：只使用separable attention输出）
+        fused_features = self.feature_fusion(separable_out)
+
+        # 3. 输出门控
         gate = self.output_gate(fused_features)
         gated_output = fused_features * gate
-        
-        # 6. 残差连接
+
+        # 4. 残差连接
         output = identity + self.residual_weight * gated_output
-        
+
         return output
     
     def get_parameter_count(self) -> dict:
@@ -303,7 +290,9 @@ class LightweightSelfAttention(nn.Module):
         if hasattr(self, 'pos_encoding'):
             module_params['position_encoding'] = sum(p.numel() for p in self.pos_encoding.parameters())
         module_params['separable_attention'] = sum(p.numel() for p in self.separable_attention.parameters())
-        module_params['hierarchical_attention'] = sum(p.numel() for p in self.hierarchical_attention.parameters())
+        # hierarchical_attention removed in Phase 1 optimization
+        if hasattr(self, 'hierarchical_attention'):
+            module_params['hierarchical_attention'] = sum(p.numel() for p in self.hierarchical_attention.parameters())
         module_params['feature_fusion'] = sum(p.numel() for p in self.feature_fusion.parameters())
         module_params['output_gate'] = sum(p.numel() for p in self.output_gate.parameters())
         

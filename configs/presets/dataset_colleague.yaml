@@ -1,0 +1,11 @@
+data:
+  dataset_type: colleague
+  data_root: ./data
+  processed_bistro_path: ./data/processed_bistro
+  required_subdirs:
+    - warp_hole
+    - ref
+    - bistro
+    - warped
+    - normal
+    - pre

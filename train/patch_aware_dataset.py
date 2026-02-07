@@ -393,41 +393,46 @@ class PatchAwareDataset(Dataset):
         )):
             # Multi-scale sampling: re-crop from original image with different scales
             if self.config.enable_multiscale:
-                # Calculate patch center from position
+                # Calculate patch center from position (SimplePatchExtractor returns x, y, width, height)
                 center_x = position.x + position.width // 2
                 center_y = position.y + position.height // 2
 
+                # Use multiscale_base_size from config
+                multiscale_base_size = self.config.multiscale_base_size
+
                 # Extract multi-scale patches from original images
                 multiscale_input = self._extract_multiscale_patch(
-                    input_numpy, center_x, center_y, base_size=128
+                    input_numpy, center_x, center_y, base_size=multiscale_base_size
                 )
                 multiscale_residual = self._extract_multiscale_patch(
-                    target_residual_numpy, center_x, center_y, base_size=128
+                    target_residual_numpy, center_x, center_y, base_size=multiscale_base_size
                 )
                 multiscale_rgb = self._extract_multiscale_patch(
-                    target_rgb_numpy, center_x, center_y, base_size=128
+                    target_rgb_numpy, center_x, center_y, base_size=multiscale_base_size
                 )
 
-                # Convert to tensors (already in [C, 128, 128] format)
+                # Convert to tensors (already in [C, multiscale_base_size, multiscale_base_size] format)
                 patch_input_tensor = torch.from_numpy(multiscale_input).float()
                 patch_target_residual_tensor = torch.from_numpy(multiscale_residual).float()
                 patch_target_rgb_tensor = torch.from_numpy(multiscale_rgb).float()
             else:
                 # Standard processing: use extracted patches
+                # Use default patch size 128 for non-multiscale mode
+                target_size = 128
                 patch_input_tensor = torch.from_numpy(input_patch).float()                    # [7, patch_h, patch_w]
                 patch_target_residual_tensor = torch.from_numpy(residual_patch).float()      # [3, patch_h, patch_w]
                 patch_target_rgb_tensor = torch.from_numpy(rgb_patch).float()                # [3, patch_h, patch_w]
 
-                # Resize to standard patch size (128x128) if needed
-                if patch_input_tensor.shape[1] != 128 or patch_input_tensor.shape[2] != 128:
+                # Resize to standard patch size if needed
+                if patch_input_tensor.shape[1] != target_size or patch_input_tensor.shape[2] != target_size:
                     patch_input_tensor = torch.nn.functional.interpolate(
-                        patch_input_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
+                        patch_input_tensor.unsqueeze(0), size=(target_size, target_size), mode='bilinear', align_corners=False
                     ).squeeze(0)
                     patch_target_residual_tensor = torch.nn.functional.interpolate(
-                        patch_target_residual_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
+                        patch_target_residual_tensor.unsqueeze(0), size=(target_size, target_size), mode='bilinear', align_corners=False
                     ).squeeze(0)
                     patch_target_rgb_tensor = torch.nn.functional.interpolate(
-                        patch_target_rgb_tensor.unsqueeze(0), size=(128, 128), mode='bilinear', align_corners=False
+                        patch_target_rgb_tensor.unsqueeze(0), size=(target_size, target_size), mode='bilinear', align_corners=False
                     ).squeeze(0)
             
             patches_input.append(patch_input_tensor)
@@ -549,12 +554,8 @@ class PatchAwareDataset(Dataset):
                     patch_target_residual_tensor = torch.from_numpy(multiscale_residual).float()
                     patch_target_rgb_tensor = torch.from_numpy(multiscale_rgb).float()
 
-                    # Create dummy position for metadata
-                    from src.npu.networks.patch.patch_extractor import PatchPosition
-                    input_position = PatchPosition(
-                        x=patch_info.center_x - 64, y=patch_info.center_y - 64,
-                        width=128, height=128
-                    )
+                    # Use None for position in multi-scale mode (position not needed for metadata)
+                    input_position = None
                 else:
                     # Standard extraction: use patch extractor
                     input_patches, input_positions = self.patch_extractor.extract_patches(

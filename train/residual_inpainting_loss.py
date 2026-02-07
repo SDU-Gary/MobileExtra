@@ -102,6 +102,9 @@ class ResidualInpaintingLoss(nn.Module):
             [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
         ], dtype=torch.float32).unsqueeze(0).repeat(3, 1, 1, 1))
         
+        # SSIM window (always create for fallback)
+        self.register_buffer('ssim_window', self._create_ssim_window(11, 3))
+
         # VGG perceptual extractor
         try:
             self.vgg_extractor = VGGFeatureExtractor()
@@ -109,7 +112,6 @@ class ResidualInpaintingLoss(nn.Module):
         except Exception as e:
             print(f"[WARN] VGG init failed, fallback to SSIM: {e}")
             self.vgg_available = False
-            self.register_buffer('ssim_window', self._create_ssim_window(11, 3))
 
         # Wavelet loss configuration
         self.wavelet_enabled = False

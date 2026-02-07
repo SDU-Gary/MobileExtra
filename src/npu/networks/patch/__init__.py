@@ -28,6 +28,11 @@ from .patch_network import (
     PatchFFCBlock
 )
 
+# Student / V2 variants
+from .patch_network_v2 import PatchNetworkV2
+from .patch_network_student import StudentPatchNetwork
+from .extranet import ExtraNet
+
 __all__ = [
     # HoleDetector
     'HoleDetector',
@@ -45,6 +50,9 @@ __all__ = [
     'PatchGatedConv2d',
     'PatchGatedConvBlock', 
     'PatchFFCBlock',
+    'PatchNetworkV2',
+    'StudentPatchNetwork',
+    'ExtraNet',
 ]
 
 # 版本信息

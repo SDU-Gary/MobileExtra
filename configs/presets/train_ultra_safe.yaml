@@ -1,0 +1,17 @@
+training:
+  batch_size: 2
+  accumulate_grad_batches: 2
+  max_epochs: 120
+  learning_rate: 2.0e-05
+  weight_decay: 1.0e-04
+  num_workers: 4
+  warmup_steps: 500
+  gradient_clip_val: 0.5
+
+memory:
+  enable_ultra_safe_mode: true
+  max_gpu_memory_gb: 4
+
+monitoring:
+  tensorboard_log_dir: ./logs/colleague_training
+  model_save_dir: ./models/colleague

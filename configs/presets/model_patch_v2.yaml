@@ -1,0 +1,29 @@
+network:
+  type: PatchNetworkV2
+  base_channels: 24
+  input_channels: 7
+  output_channels: 3
+  residual_scale_factor: 1.0
+
+patch:
+  # 使用重叠裁剪，256×256，stride 128，按洞面积排序取前 50%
+  use_simple_grid_patches: false
+  use_overlapping_crops: true
+  patch_size: 256
+  crop_size: 256
+  crop_stride: 128
+  keep_top_frac: 0.5
+  min_hole_frac: 0.005
+  max_patches_per_image: 999999  # 由重叠索引控制，保持足够大
+  min_patches_per_image: 1
+  enable_multiscale: false
+  simple_grid_rows: 0
+  simple_grid_cols: 0
+
+training:
+  batch_size: 2
+  accumulate_grad_batches: 2
+
+memory:
+  enable_ultra_safe_mode: true
+  max_gpu_memory_gb: 4

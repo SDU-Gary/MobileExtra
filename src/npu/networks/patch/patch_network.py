@@ -195,9 +195,12 @@ class PatchNetwork(nn.Module):
     
     def __init__(self, input_channels=7, output_channels=3, base_channels=64, residual_scale_factor=1.0):
         super(PatchNetwork, self).__init__()
-        
+
+        # Store base_channels for feature distillation
+        self.base_channels = base_channels
+
         self.ch1 = base_channels      # 64
-        self.ch2 = int(base_channels * 1.5)  # 96  
+        self.ch2 = int(base_channels * 1.5)  # 96
         self.ch3 = base_channels * 2  # 128
         self.ch4 = base_channels * 3  # 192
         self.ch5 = base_channels * 4  # 256 (bottleneck)
@@ -305,40 +308,42 @@ class PatchNetwork(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
     
-    def forward(self, x, return_full_image=False, boundary_override=None):
+    def forward(self, x, return_full_image=False, boundary_override=None, return_intermediates=False):
         """
         前向传播 - 残差学习版本
-        
+
         Args:
             x: 输入特征 [B, 7, H, W]
             return_full_image: 是否返回完整重建图像
             boundary_override: 可选的外部边界掩码 [B, 1, H, W]，若提供则覆盖内部基于空洞的边界图
-            
+            return_intermediates: 是否返回中间层特征（用于知识蒸馏）
+
         Returns:
             默认: residual_prediction [B, 3, H, W] ∈ [-1, 1]
             可选: (residual_prediction, reconstructed_image) 如果 return_full_image=True
+            可选: (residual_prediction, intermediates_dict) 如果 return_intermediates=True
         """
         boundary_mask = boundary_override if boundary_override is not None else self._generate_boundary_mask(x)
-        
+
         x_input = self.input_proj(x, boundary_mask)
-        
+
         #  NEW: 5层编码器前向传播
         e1 = self.encoder1(x_input, boundary_mask)
         d1 = self.down1(e1, boundary_mask)
-        
+
         e2 = self.encoder2(d1, boundary_mask)
         d2 = self.down2(e2, boundary_mask)
-        
+
         e3 = self.encoder3(d2, boundary_mask)
         d3 = self.down3(e3, boundary_mask)
-        
+
         e4 = self.encoder4(d3, boundary_mask)
         d4 = self.down4(e4, boundary_mask)
-        
+
         e5 = self.encoder5(d4)
-        
+
         bottleneck_out = self.bottleneck(e5)
-        
+
         #  NEW: 5层解码器前向传播，对称skip connections
         u1 = self.up1(bottleneck_out)
         if u1.shape[2:] != e4.shape[2:]:
@@ -367,14 +372,25 @@ class PatchNetwork(nn.Module):
         u4 = torch.cat([u4, e1], dim=1)
         u4 = self.up_conv4(u4, boundary_mask)
         u4 = self.decoder4(u4, boundary_mask)
-        
+
         #  残差学习: 网络输出残差预测（线性、无限制）
         residual_prediction = self.output_conv(u4)
-        
+
         #  FIX: 确保输出尺寸与输入完全匹配
         if residual_prediction.shape[2:] != x.shape[2:]:
             residual_prediction = F.interpolate(residual_prediction, size=x.shape[2:], mode='bilinear', align_corners=False)
-        
+
+        # 返回中间层特征（用于知识蒸馏）
+        if return_intermediates:
+            intermediates = {
+                'encoder3': e3,      # [B, 128, H/4, W/4]
+                'encoder5': e5,      # [B, 256, H/16, W/16]
+                'bottleneck': bottleneck_out,  # [B, 256, H/16, W/16]
+                'decoder2': u2,      # [B, 128, H/4, W/4]
+                'decoder4': u4,      # [B, 64, H, W]
+            }
+            return residual_prediction, intermediates
+
         if return_full_image:
             warped_rgb = x[:, :3]
             reconstructed_image = warped_rgb + residual_prediction * self.residual_scale_factor

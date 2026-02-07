@@ -39,15 +39,15 @@ pip install opencv-python zarr pillow tensorboard
 #### Patch-Based Training
 
 ```bash
-# Ultra-safe patch training (RECOMMENDED)
-python start_ultra_safe_training.py
+# Unified launcher (recommended)
+python tools/train.py --presets base,model_patch_v2
 
-# Alternative patch training methods
-python train_patch_system.py
-
-# Test patch system
-python test_patch_system.py
+# Quick dry-run to inspect merged config
+python tools/train.py --presets base,model_patch_v2 --dry-run
 ```
+
+See `docs/PIPELINE.md` for the clean, reproducible end-to-end pipeline
+(training, distillation, benchmarking, and export).
 
 #### Data Preprocessing
 
@@ -172,14 +172,11 @@ pip install opencv-python zarr pillow tensorboard
 #### 补丁训练系统
 
 ```bash
-# 超安全补丁训练（推荐）
-python start_ultra_safe_training.py
+# 统一入口（推荐）
+python tools/train.py --presets base,model_patch_v2
 
-# 其他补丁训练方式
-python train_patch_system.py
-
-# 测试补丁系统
-python test_patch_system.py
+# 仅查看合并配置（不启动训练）
+python tools/train.py --presets base,model_patch_v2 --dry-run
 ```
 
 #### 数据预处理

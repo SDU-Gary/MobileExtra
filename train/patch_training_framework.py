@@ -31,6 +31,23 @@ try:
 except ImportError:
     PTWT_AVAILABLE = False
 
+try:
+    from feature_distillation_loss import create_feature_distillation_loss
+    FEATURE_DISTILLATION_AVAILABLE = True
+except ImportError:
+    try:
+        from train.feature_distillation_loss import create_feature_distillation_loss
+        FEATURE_DISTILLATION_AVAILABLE = True
+    except ImportError:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'train'))
+        try:
+            from feature_distillation_loss import create_feature_distillation_loss
+            FEATURE_DISTILLATION_AVAILABLE = True
+        except ImportError:
+            FEATURE_DISTILLATION_AVAILABLE = False
+            print("[WARN] feature_distillation_loss.py not found, feature distillation will be disabled")
+
 class PerceptualLoss(nn.Module):
     """简化版感知损失：优先使用VGG16，失败时退化为SSIM。"""
 
@@ -146,10 +163,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'npu'))
 
 # Use absolute imports to avoid relative import issues
 try:
-    from src.npu.networks.patch import PatchNetwork
+    from src.npu.networks.patch import PatchNetwork, PatchNetworkV2, StudentPatchNetwork
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from src.npu.networks.patch import PatchNetwork
+    from src.npu.networks.patch import PatchNetwork, StudentPatchNetwork
+    try:
+        from src.npu.networks.patch.patch_network_v2 import PatchNetworkV2
+    except Exception:
+        PatchNetworkV2 = None
 
 # 导入patch数据集
 try:
@@ -979,12 +1000,29 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         base_channels = inpainting_config.get('base_channels', 64)
         residual_scale = inpainting_config.get('residual_scale_factor', 1.0)
 
-        self.patch_network = PatchNetwork(
-            input_channels=input_channels,
-            output_channels=output_channels,
-            base_channels=base_channels,
-            residual_scale_factor=residual_scale,
-        )
+        network_type = str(inpainting_config.get('type', (full_config or {}).get('network', {}).get('type', 'PatchNetwork'))).lower()
+        if network_type in {"patchnetworkv2", "v2", "patch_network_v2"}:
+            if PatchNetworkV2 is None:
+                raise ImportError("PatchNetworkV2 未找到，请确认 src/npu/networks/patch/patch_network_v2.py 存在并可导入")
+            self.patch_network = PatchNetworkV2(
+                input_channels=input_channels,
+                output_channels=output_channels,
+                base_channels=base_channels,
+                residual_scale_factor=residual_scale,
+            )
+        elif network_type in {"student", "student_s1", "student_s2"}:
+            # map variant
+            if network_type == "student_s2":
+                self.patch_network = StudentPatchNetwork.from_variant('s2')
+            else:
+                self.patch_network = StudentPatchNetwork.from_variant('s1')
+        else:
+            self.patch_network = PatchNetwork(
+                input_channels=input_channels,
+                output_channels=output_channels,
+                base_channels=base_channels,
+                residual_scale_factor=residual_scale,
+            )
         self.teacher_model = None
         self._print_model_architecture_info(inpainting_config)
         
@@ -1026,11 +1064,135 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             wavelet_config=wavelet_cfg,
         )
 
+        # Distillation (teacher) config
+        distill_cfg = (full_config or {}).get('distill', {}) if full_config else {}
+        self.distill_lambda = float(distill_cfg.get('lambda', 0.0))
+        distill_enable = bool(distill_cfg.get('enable', self.distill_lambda > 0.0))
+        teacher_ckpt = distill_cfg.get('teacher_ckpt', None)
+        distill_strict = bool(distill_cfg.get('strict', True))
+        teacher_type = str(distill_cfg.get('teacher_type', 'v2')).lower()
+        self.teacher_model = None
+        if distill_enable:
+            if not teacher_ckpt:
+                raise RuntimeError("Distillation enabled but distill.teacher_ckpt is not set")
+            if not (self.distill_lambda > 0.0):
+                raise RuntimeError("Distillation enabled but distill.lambda <= 0")
+            if not os.path.exists(str(teacher_ckpt)):
+                raise FileNotFoundError(f"Teacher checkpoint not found: {teacher_ckpt}")
+            try:
+                if teacher_type in {"patchnetworkv2", "v2", "patch_network_v2"}:
+                    teacher = PatchNetworkV2(
+                        input_channels=input_channels,
+                        output_channels=output_channels,
+                        base_channels=base_channels,
+                        residual_scale_factor=residual_scale,
+                    )
+                elif teacher_type in {"student", "student_s1", "student_s2"}:
+                    teacher = StudentPatchNetwork.from_variant('s2' if teacher_type == 'student_s2' else 's1')
+                elif teacher_type in {"v1", "patchnetwork", "patch_network"}:
+                    # BUGFIX: V1 teacher uses base_channels=24 (2.32M params), NOT student's base_channels
+                    teacher = PatchNetwork(
+                        input_channels=input_channels,
+                        output_channels=output_channels,
+                        base_channels=24,  # V1 teacher architecture (hardcoded)
+                        residual_scale_factor=residual_scale,
+                    )
+                else:
+                    # Unknown teacher type: use student config as fallback (may cause checkpoint loading issues)
+                    print(f"[WARN] Unknown teacher_type='{teacher_type}', using base_channels={base_channels}")
+                    teacher = PatchNetwork(
+                        input_channels=input_channels,
+                        output_channels=output_channels,
+                        base_channels=base_channels,
+                        residual_scale_factor=residual_scale,
+                    )
+                # load weights
+                ckpt = torch.load(teacher_ckpt, map_location='cpu', weights_only=False)
+                raw_sd = ckpt.get('state_dict', ckpt)
+                # strip prefix
+                if any(k.startswith('patch_network.') for k in raw_sd.keys()):
+                    raw_sd = {k.replace('patch_network.', ''): v for k, v in raw_sd.items() if k.startswith('patch_network.')}
+                # filter size-mismatched keys to avoid RuntimeError
+                t_sd = teacher.state_dict()
+                filtered = {}
+                dropped = []
+                for k, v in raw_sd.items():
+                    if k in t_sd and t_sd[k].shape == v.shape:
+                        filtered[k] = v
+                    else:
+                        dropped.append(k)
+                missing, unexpected = teacher.load_state_dict(filtered, strict=False)
+                if dropped or missing or unexpected:
+                    print(f"[WARN] Teacher load partial. dropped={len(dropped)}, missing={len(missing)}, unexpected={len(unexpected)}")
+                teacher.eval()
+                for p in teacher.parameters():
+                    p.requires_grad = False
+                self.teacher_model = teacher.to(self.device if hasattr(self, 'device') else 'cuda' if torch.cuda.is_available() else 'cpu')
+                print(f"Distillation enabled: teacher={teacher_type}, ckpt={teacher_ckpt}, lambda={self.distill_lambda}")
+            except Exception as e:
+                if distill_strict:
+                    raise
+                print(f"[WARN] Failed to load teacher for distillation (strict=false): {e}")
+                self.teacher_model = None
+
+        # Feature distillation (intermediate features) config
+        feat_distill_cfg = distill_cfg.get('feature', {}) if distill_cfg else {}
+        self.feat_distill_lambda = float(feat_distill_cfg.get('lambda', 0.0))
+        self.feat_distill_loss = None
+        if self.feat_distill_lambda > 0.0 and self.teacher_model is not None and FEATURE_DISTILLATION_AVAILABLE:
+            try:
+                # Determine teacher and student base channels
+                if not hasattr(self.teacher_model, 'base_channels'):
+                    print(f"[WARN] Teacher model missing base_channels attribute, cannot enable feature distillation")
+                    self.feat_distill_loss = None
+                elif not hasattr(self.patch_network, 'base_channels'):
+                    print(f"[WARN] Student model missing base_channels attribute, cannot enable feature distillation")
+                    self.feat_distill_loss = None
+                else:
+                    teacher_base_ch = self.teacher_model.base_channels
+                    student_base_ch = self.patch_network.base_channels
+
+                    # Validate channel configuration
+                    expected_teacher_ch3 = teacher_base_ch * 2
+                    expected_student_ch3 = student_base_ch * 2
+
+                    print(f"[Feature Distillation] Initializing with:")
+                    print(f"  Teacher base_channels: {teacher_base_ch} (encoder3: {expected_teacher_ch3}ch)")
+                    print(f"  Student base_channels: {student_base_ch} (encoder3: {expected_student_ch3}ch)")
+
+                    # Create feature distillation loss
+                    layer_weights = feat_distill_cfg.get('layer_weights', None)
+                    use_adaptive = feat_distill_cfg.get('adaptive', False)
+                    use_l1 = feat_distill_cfg.get('use_l1', False)
+                    normalize = feat_distill_cfg.get('normalize', True)
+
+                    self.feat_distill_loss = create_feature_distillation_loss(
+                        teacher_base_channels=teacher_base_ch,
+                        student_base_channels=student_base_ch,
+                        adaptive=use_adaptive,
+                        layer_weights=layer_weights,
+                        use_l1=use_l1,
+                        normalize=normalize,
+                    )
+                    print(f"✅ Feature distillation enabled: lambda={self.feat_distill_lambda}, adaptive={use_adaptive}")
+            except Exception as e:
+                print(f"[WARN] Failed to create feature distillation loss: {e}")
+                import traceback
+                traceback.print_exc()
+                self.feat_distill_loss = None
+        elif self.feat_distill_lambda > 0.0 and not FEATURE_DISTILLATION_AVAILABLE:
+            print(f"[WARN] Feature distillation requested but feature_distillation_loss.py not found")
+
         # 梯度范数监控参数
         if self.gan_enabled:
             self.grad_clip_val = None
         else:
-            self.grad_clip_val = float(training_config.get('gradient_clip_val', 0.5))
+            grad_clip_cfg = training_config.get('gradient_clip_val', 0.5)
+            # Handle None/null from YAML: treat as disabled (None or 0.0)
+            if grad_clip_cfg is None or (isinstance(grad_clip_cfg, (int, float)) and grad_clip_cfg <= 0.0):
+                self.grad_clip_val = None
+            else:
+                self.grad_clip_val = float(grad_clip_cfg)
         self.grad_norm_ema = 0.0
         self.grad_ema_decay = 0.95
         
@@ -1402,6 +1564,10 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             # 训练阶段改为与推理一致：不使用GT边界覆盖，统一由网络内部推导
             boundary_override = None
 
+            # 特征蒸馏：是否返回中间特征
+            return_intermediates = (self.feat_distill_loss is not None)
+            student_intermediates = None
+
             # Patch网络推理（统一归一化入口）
             residual_pred_norm = None
             scale = self.patch_network.residual_scale_factor
@@ -1412,7 +1578,11 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
                 Xn = (warped_rgb - mu) / torch.clamp(sigma, min=1e-6)
                 patch_input_norm = patch_input.clone()
                 patch_input_norm[:, :3] = Xn
-                residual_pred_norm = self.patch_network(patch_input_norm, boundary_override=boundary_override)
+                out = self.patch_network(patch_input_norm, boundary_override=boundary_override, return_intermediates=return_intermediates)
+                if return_intermediates:
+                    residual_pred_norm, student_intermediates = out
+                else:
+                    residual_pred_norm = out
                 residual_pred_norm = residual_pred_norm * scale
             elif self.norm_type == 'per_patch':
                 warped_rgb = patch_input[:, :3]
@@ -1426,7 +1596,11 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
                     b = torch.clamp(b, min=self.in_norm_min_scale, max=self.in_norm_max_scale)
                 patch_input_norm = patch_input.clone()
                 patch_input_norm[:, :3] = patch_input_norm[:, :3] / b
-                residual_pred_norm = self.patch_network(patch_input_norm, boundary_override=boundary_override)
+                out = self.patch_network(patch_input_norm, boundary_override=boundary_override, return_intermediates=return_intermediates)
+                if return_intermediates:
+                    residual_pred_norm, student_intermediates = out
+                else:
+                    residual_pred_norm = out
                 residual_pred_norm = residual_pred_norm * scale
             elif self.norm_type == 'log':
                 warped_rgb = patch_input[:, :3]
@@ -1446,7 +1620,11 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
                 patch_input_norm = patch_input.clone()
                 patch_input_norm[:, :3] = Xn
                 # IMPORTANT: predict delta in log space (bounded via tanh)
-                residual_pred_log = self.patch_network(patch_input_norm, boundary_override=boundary_override)
+                out = self.patch_network(patch_input_norm, boundary_override=boundary_override, return_intermediates=return_intermediates)
+                if return_intermediates:
+                    residual_pred_log, student_intermediates = out
+                else:
+                    residual_pred_log = out
                 # Scale delta in log domain
                 if self.log_delta_abs_max > 0.0:
                     # Absolute-cap mode: delta limited by a global max magnitude
@@ -1470,7 +1648,11 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
                     delta_log = delta_log * mask_weight
             else:
                 residual_pred_norm = None
-                residual_pred = self.patch_network(patch_input, boundary_override=boundary_override)
+                out = self.patch_network(patch_input, boundary_override=boundary_override, return_intermediates=return_intermediates)
+                if return_intermediates:
+                    residual_pred, student_intermediates = out
+                else:
+                    residual_pred = out
                 residual_pred = residual_pred * scale
             
             #  使用统一的残差学习工具类
@@ -1494,7 +1676,12 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             elif self.norm_type == 'log':
                 # Scheme B: true log-space residual learning
                 Ln_hat = log_img + delta_log
+                # BUGFIX: Clamp Ln_hat to prevent explosive exp() values
+                # exp(10) ≈ 22000 (bright highlights), exp(-10) ≈ 0.00005 (dark shadows)
+                Ln_hat = torch.clamp(Ln_hat, min=-10.0, max=10.0)
                 patch_pred_full = torch.exp(Ln_hat) - eps
+                # BUGFIX: Clamp HDR to reasonable range [0, 100]
+                patch_pred_full = torch.clamp(patch_pred_full, min=0.0, max=100.0)
             else:
                 patch_pred_full = ResidualLearningHelper.reconstruct_from_residual(warped_rgb, residual_pred)
             # Sanitize NaN/Inf before loss & visualization
@@ -1504,6 +1691,8 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             # 损失计算使用完整重建图像与目标RGB
             predictions['patch'] = patch_pred_full
             targets['patch'] = patch_target_rgb
+
+            # Distillation logic moved to after self.patch_loss() call - see below after line ~1660
 
             # NEW: optional log-domain supervision on holes (+ring), comparing delta_log to GT log residual
             log_sup_loss = None
@@ -1561,6 +1750,44 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             recon_loss = recon_loss + self.log_sup_weight * log_sup_loss
             loss_dict['log_supervision'] = log_sup_loss.detach()
 
+        # Distillation (teacher -> student) - compute after main loss calculation
+        if hasattr(self, 'teacher_model') and self.teacher_model is not None:
+            with torch.no_grad():
+                # 教师输入保持与学生一致的归一化分支
+                t_input = patch_input if self.norm_type == 'none' else (patch_input_norm if 'patch_input_norm' in locals() else patch_input)
+                t_out = self.teacher_model(t_input, return_intermediates=return_intermediates)
+
+                # 处理返回值（可能是tuple）
+                teacher_intermediates = None
+                if isinstance(t_out, tuple):
+                    t_out, teacher_intermediates = t_out
+
+                # 根据归一化类型选择正确的student输出变量
+                if self.norm_type == 'log':
+                    student_out = residual_pred_log  # Log模式：使用log空间的预测
+                    # 学生和教师现在都使用 log_delta_abs_max=16.0（完全匹配V1配置）
+                    # 归一化空间完全一致，无需缩放
+
+                elif self.norm_type in ['global', 'per_patch']:
+                    student_out = residual_pred_norm  # 归一化模式：使用norm空间的预测
+                else:
+                    student_out = residual_pred  # 无归一化：直接使用residual
+
+                if t_out.shape[2:] != student_out.shape[2:]:
+                    t_out = F.interpolate(t_out, size=student_out.shape[2:], mode='bilinear', align_corners=False)
+
+            # 输出级蒸馏损失（原有）
+            loss_distill = F.l1_loss(student_out, t_out)
+            loss_dict['loss_distill'] = loss_distill.detach()
+            recon_loss = recon_loss + self.distill_lambda * loss_distill
+
+            # 特征级蒸馏损失（新增）
+            if self.feat_distill_loss is not None and student_intermediates is not None and teacher_intermediates is not None:
+                feat_distill_loss, feat_loss_dict = self.feat_distill_loss(teacher_intermediates, student_intermediates)
+                loss_dict['loss_feat_distill'] = feat_distill_loss.detach()
+                loss_dict.update(feat_loss_dict)  # 添加各层损失
+                recon_loss = recon_loss + self.feat_distill_lambda * feat_distill_loss
+
         # 重建误差分位数（训练）
         if 'patch' in predictions and 'patch' in targets:
             self._log_recon_error_percentiles(predictions['patch'], targets['patch'], prefix='train')
@@ -1576,24 +1803,54 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             pred_ldr = self._tone_map_for_vgg(predictions['patch'])
             target_ldr = self._tone_map_for_vgg(targets['patch'])
 
+            # 初始化判别器打分变量
+            d_real_score = torch.tensor(0.0, device=recon_loss.device)
+            d_fake_score = torch.tensor(0.0, device=recon_loss.device)
+
+            # Check if using asymmetric discriminator
+            from src.npu.networks.discriminator import AsymmetricPatchGANDiscriminator
+            is_asymmetric = isinstance(self.discriminator, AsymmetricPatchGANDiscriminator)
+
             if self.gan_step_enabled:
                 loss_d_total = []
                 for _ in range(max(1, self.gan_d_steps)):
                     opt_d.zero_grad(set_to_none=True)
-                    real_in = torch.cat([target_ldr.detach(), hole_mask.detach()], dim=1)
-                    fake_in = torch.cat([pred_ldr.detach(), hole_mask.detach()], dim=1)
-                    d_real = self.discriminator(real_in)
-                    d_fake = self.discriminator(fake_in)
+
+                    if is_asymmetric:
+                        # Asymmetric: real=3ch (RGB only), fake=4ch (RGB+mask)
+                        real_in = target_ldr.detach()  # No mask for real samples
+                        fake_in = torch.cat([pred_ldr.detach(), hole_mask.detach()], dim=1)
+                        d_real = self.discriminator(real_in, is_real=True)
+                        d_fake = self.discriminator(fake_in, is_real=False)
+                    else:
+                        # Symmetric: both use same mask (legacy behavior)
+                        real_in = torch.cat([target_ldr.detach(), hole_mask.detach()], dim=1)
+                        fake_in = torch.cat([pred_ldr.detach(), hole_mask.detach()], dim=1)
+                        d_real = self.discriminator(real_in)
+                        d_fake = self.discriminator(fake_in)
+
                     loss_d_step = self.adversarial_loss.discriminator_loss(d_real, d_fake)
                     self.manual_backward(loss_d_step, retain_graph=False)
                     opt_d.step()
                     loss_d_total.append(loss_d_step.detach())
+
+                # 记录判别器打分（用于监控GAN训练健康度）
+                d_real_score = d_real.detach().mean()
+                d_fake_score = d_fake.detach().mean()
+
                 loss_d = torch.stack(loss_d_total).mean() if loss_d_total else loss_d
 
             opt_g.zero_grad(set_to_none=True)
             if self.gan_step_enabled and self.current_lambda_adv > 0.0:
-                fake_in_g = torch.cat([pred_ldr, hole_mask], dim=1)
-                d_fake_for_g = self.discriminator(fake_in_g)
+                if is_asymmetric:
+                    # Asymmetric: fake uses RGB+mask
+                    fake_in_g = torch.cat([pred_ldr, hole_mask], dim=1)
+                    d_fake_for_g = self.discriminator(fake_in_g, is_real=False)
+                else:
+                    # Symmetric: use RGB+mask
+                    fake_in_g = torch.cat([pred_ldr, hole_mask], dim=1)
+                    d_fake_for_g = self.discriminator(fake_in_g)
+
                 loss_adv = self.adversarial_loss.generator_loss(d_fake_for_g)
                 total_loss = recon_loss + self.current_lambda_adv * loss_adv
             else:
@@ -1628,6 +1885,9 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             log_entries['train_loss_d'] = loss_d.detach()
             log_entries['gan_lambda_adv'] = torch.tensor(self.current_lambda_adv, device=total_loss.device)
             log_entries['gan_phase'] = torch.tensor(1 if self.gan_step_enabled else 0, device=total_loss.device)
+            # FIX: 添加判别器打分监控（健康的GAN: D_real>0, D_fake<0）
+            log_entries['gan_d_real_mean'] = d_real_score
+            log_entries['gan_d_fake_mean'] = d_fake_score
 
         self.log_dict(log_entries, on_step=False, on_epoch=True, prog_bar=True)
 
@@ -1770,7 +2030,11 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
                     mask_weight = torch.clamp(holes_mask + self.log_delta_mask_ring_scale * ring, 0.0, 1.0)
                     delta_log = delta_log * mask_weight
                 Ln_hat = log_img + delta_log
+                # BUGFIX: Clamp Ln_hat to prevent explosive exp() values (same as training_step)
+                Ln_hat = torch.clamp(Ln_hat, min=-10.0, max=10.0)
                 patch_pred_full = torch.exp(Ln_hat) - eps
+                # BUGFIX: Clamp HDR to reasonable range [0, 100]
+                patch_pred_full = torch.clamp(patch_pred_full, min=0.0, max=100.0)
             else:
                 residual_pred_norm = None
                 residual_pred = self.patch_network(batch['patch_input'], boundary_override=boundary_override) * scale
@@ -1803,12 +2067,24 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
             targets['patch'] = batch['patch_target_rgb']  # 使用RGB目标
             
             if self.gan_enabled and self.discriminator is not None:
+                # Check if using asymmetric discriminator
+                from src.npu.networks.discriminator import AsymmetricPatchGANDiscriminator
+                is_asymmetric = isinstance(self.discriminator, AsymmetricPatchGANDiscriminator)
+
                 with torch.no_grad():
                     hole_mask_val = batch['patch_input'][:, 3:4]
                     pred_ldr_val = self._tone_map_for_vgg(patch_pred_full)
                     target_ldr_val = self._tone_map_for_vgg(batch['patch_target_rgb'])
-                    d_real_val = self.discriminator(torch.cat([target_ldr_val, hole_mask_val], dim=1))
-                    d_fake_val = self.discriminator(torch.cat([pred_ldr_val, hole_mask_val], dim=1))
+
+                    if is_asymmetric:
+                        # Asymmetric: real=3ch, fake=4ch
+                        d_real_val = self.discriminator(target_ldr_val, is_real=True)
+                        d_fake_val = self.discriminator(torch.cat([pred_ldr_val, hole_mask_val], dim=1), is_real=False)
+                    else:
+                        # Symmetric: both use mask
+                        d_real_val = self.discriminator(torch.cat([target_ldr_val, hole_mask_val], dim=1))
+                        d_fake_val = self.discriminator(torch.cat([pred_ldr_val, hole_mask_val], dim=1))
+
                     adv_val = self.adversarial_loss.generator_loss(d_fake_val)
                     self.log('val_adv_loss', adv_val.detach(), on_step=False, on_epoch=True, prog_bar=False)
                     self.log('val_disc_real', d_real_val.mean().detach(), on_step=False, on_epoch=True, prog_bar=False)
@@ -2075,7 +2351,73 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         if schedulers:
             result['lr_scheduler'] = schedulers if len(schedulers) > 1 else schedulers[0]
         return result
-    
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        """
+        Handle cross-stage checkpoint loading (e.g., Stage 1 → Stage 2) - FALLBACK ONLY.
+
+        WARNING: This hook is called AFTER Lightning has already restored trainer state,
+        so it CANNOT properly reset epoch/global_step counters.
+
+        RECOMMENDED: Use the proper cross-stage loading approach by setting
+        'cross_stage_loading: true' in your config, which loads weights BEFORE trainer.fit().
+
+        This fallback only handles discriminator mismatch for partial weight loading.
+        """
+        state_dict = checkpoint.get('state_dict', {})
+        current_state = self.state_dict()
+
+        # Check for discriminator mismatch (cross-stage loading)
+        has_discriminator_in_ckpt = any(k.startswith('discriminator.') for k in state_dict.keys())
+        has_discriminator_in_model = any(k.startswith('discriminator.') for k in current_state.keys())
+
+        # Store flag for load_state_dict to use
+        self._cross_stage_loading = False
+
+        if has_discriminator_in_model and not has_discriminator_in_ckpt:
+            # Loading from Stage 1 (no GAN) to Stage 2 (with GAN)
+            print(" [跨阶段加载-降级模式] 检测到从无GAN模型恢复到有GAN模型")
+            print(" [跨阶段加载-降级模式] 判别器权重将随机初始化")
+            print(" [警告] 训练进度将从断点继续，而非从epoch 0开始")
+            print(" [建议] 请在配置中设置 'cross_stage_loading: true' 以正确重置训练进度")
+
+            # Count how many discriminator keys exist in current model
+            num_discriminator_keys = sum(1 for k in current_state.keys() if k.startswith('discriminator.'))
+            print(f" [跨阶段加载-降级模式] 当前模型包含 {num_discriminator_keys} 个判别器权重键")
+            print(f" [跨阶段加载-降级模式] 断点文件包含 {len(state_dict)} 个权重键（无判别器）")
+
+            # Set flag to use strict=False in load_state_dict
+            self._cross_stage_loading = True
+
+        elif not has_discriminator_in_model and has_discriminator_in_ckpt:
+            # Loading from Stage 2 (with GAN) to Stage 1 (no GAN) - rare case
+            print(" [跨阶段加载-降级模式] 检测到从有GAN模型恢复到无GAN模型（忽略判别器权重）")
+            print(" [警告] 训练进度将从断点继续，而非从epoch 0开始")
+            print(" [建议] 请在配置中设置 'cross_stage_loading: true' 以正确重置训练进度")
+
+            # Filter out discriminator keys
+            filtered_state = {k: v for k, v in state_dict.items() if not k.startswith('discriminator.')}
+            checkpoint['state_dict'] = filtered_state
+            print(f" [跨阶段加载-降级模式] 已过滤 {len(state_dict) - len(filtered_state)} 个判别器权重")
+
+            # Set flag to use strict=False
+            self._cross_stage_loading = True
+
+        # Call parent implementation (will eventually call our load_state_dict)
+        super().on_load_checkpoint(checkpoint)
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Override to handle cross-stage loading with strict=False."""
+        if getattr(self, '_cross_stage_loading', False):
+            # Cross-stage loading detected - use strict=False
+            print(" [跨阶段加载] 使用 strict=False 加载断点")
+            result = super().load_state_dict(state_dict, strict=False)
+            self._cross_stage_loading = False  # Reset flag
+            return result
+        else:
+            # Normal loading
+            return super().load_state_dict(state_dict, strict=strict)
+
     def on_train_epoch_start(self) -> None:
         super().on_train_epoch_start()
         if self.gan_enabled:
@@ -2145,7 +2487,8 @@ class PatchFrameInterpolationTrainer(pl.LightningModule):
         output_channels = inpainting_config.get('output_channels', 3)
         base_channels = inpainting_config.get('base_channels', 64)
         
-        print(f" 网络类型: PatchNetwork (patch训练框架)")
+        net_type = inpainting_config.get('type', 'PatchNetwork') if isinstance(inpainting_config, dict) else 'PatchNetwork'
+        print(f" 网络类型: {net_type} (patch训练框架)")
         print(f" 输入通道数: {input_channels}")
         print(f" 输出通道数: {output_channels}")
         print(f" base_channels: {base_channels}")
@@ -2422,39 +2765,22 @@ def run_patch_training(config: Dict[str, Any]) -> bool:
         )
         # callbacks.append(early_stop_callback)
         
-        # TensorBoard日志记录器：若存在断点，尝试复用最近一次版本目录（避免新开run）
+        # TensorBoard日志记录器：研究记录必须可复现，禁止复用旧版本目录
         tb_save_dir = monitoring_config.get('tensorboard_log_dir', './logs/colleague_training')
-        tb_name = 'patch_training'
-        tb_version = None
-        try:
-            ckpt_dir_for_tb = monitoring_config.get('model_save_dir', './models/colleague')
-            last_ckpt_for_tb = os.path.join(ckpt_dir_for_tb, 'last.ckpt')
-            if os.path.exists(last_ckpt_for_tb):
-                base = os.path.join(tb_save_dir, tb_name)
-                if os.path.exists(base):
-                    vers = []
-                    for d in os.listdir(base):
-                        p = os.path.join(base, d)
-                        if os.path.isdir(p) and d.startswith('version_'):
-                            try:
-                                n = int(d.split('_', 1)[1])
-                                vers.append(n)
-                            except Exception:
-                                pass
-                    if vers:
-                        tb_version = max(vers)
-                        print(f" 复用TensorBoard版本: {tb_version} (继续写入 {os.path.join(base, f'version_{tb_version}')} )")
-        except Exception:
-            tb_version = None
-
         tb_logger = TensorBoardLogger(
             save_dir=tb_save_dir,
-            name=tb_name,
-            version=tb_version
+            name='patch_training',
+            version=None,
         )
         
         # 创建Lightning Trainer
         gc_val = training_config.get('gradient_clip_val', 0.5)
+        # If manual optimization is used (GAN enabled), gradient clipping not supported
+        try:
+            if hasattr(trainer, 'automatic_optimization') and trainer.automatic_optimization is False:
+                gc_val = None
+        except Exception:
+            pass
         accum_batches = int(trainer_config.get('accumulate_grad_batches', 1))
 
         trainer_kwargs = dict(
@@ -2486,10 +2812,74 @@ def run_patch_training(config: Dict[str, Any]) -> bool:
         # 启动训练（支持断点续训）
         print(" 启动PyTorch Lightning训练...")
         ckpt_dir = monitoring_config.get('model_save_dir', './models/colleague')
-        last_ckpt = os.path.join(ckpt_dir, 'last.ckpt')
-        ckpt_path = last_ckpt if (isinstance(ckpt_dir, str) and os.path.exists(last_ckpt)) else None
-        if ckpt_path:
-            print(f" 检测到断点文件，自动从断点续训: {ckpt_path}")
+
+        # Support custom checkpoint via --resume_from parameter
+        custom_ckpt = training_config.get('resume_from_ckpt', None)
+        cross_stage_mode = training_config.get('cross_stage_loading', False)
+
+        if custom_ckpt:
+            # User explicitly specified checkpoint via --resume_from
+            if os.path.exists(custom_ckpt):
+                ckpt_path = custom_ckpt
+                print(f" 从指定断点恢复训练: {ckpt_path}")
+            else:
+                print(f" [警告] 指定的断点文件不存在: {custom_ckpt}")
+                ckpt_path = None
+        else:
+            # Auto-resume from last.ckpt if exists (default behavior)
+            last_ckpt = os.path.join(ckpt_dir, 'last.ckpt')
+            resume_enabled = bool(training_config.get('resume', True))
+            ckpt_path = last_ckpt if (resume_enabled and isinstance(ckpt_dir, str) and os.path.exists(last_ckpt)) else None
+            if ckpt_path:
+                print(f" 检测到断点文件，自动从断点续训: {ckpt_path}")
+
+        # CRITICAL FIX: Handle cross-stage loading BEFORE trainer.fit()
+        # If cross_stage_loading is enabled, we manually load only model weights
+        # and prevent Lightning from restoring trainer state (epoch, global_step)
+        if cross_stage_mode and ckpt_path:
+            print("\n" + "="*60)
+            print(" [跨阶段加载] 检测到跨阶段加载模式")
+            print(" [跨阶段加载] 将仅加载模型权重，忽略训练状态（epoch/global_step）")
+            print("="*60)
+
+            import torch
+            # Note: weights_only=False is required for checkpoints containing custom classes
+            checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+
+            # Extract old training state for logging
+            old_epoch = checkpoint.get('epoch', 0)
+            old_global_step = checkpoint.get('global_step', 0)
+            print(f" [跨阶段加载] 源断点训练状态: epoch={old_epoch}, global_step={old_global_step}")
+
+            # Check for discriminator mismatch
+            state_dict = checkpoint.get('state_dict', {})
+            has_discriminator_in_ckpt = any(k.startswith('discriminator.') for k in state_dict.keys())
+            current_state = trainer.state_dict()
+            has_discriminator_in_model = any(k.startswith('discriminator.') for k in current_state.keys())
+
+            if has_discriminator_in_model and not has_discriminator_in_ckpt:
+                print(" [跨阶段加载] Stage 1 (无GAN) → Stage 2 (有GAN)")
+                print(" [跨阶段加载] 判别器权重将随机初始化")
+                # Load with strict=False to allow missing discriminator keys
+                trainer.load_state_dict(state_dict, strict=False)
+            elif not has_discriminator_in_model and has_discriminator_in_ckpt:
+                print(" [跨阶段加载] Stage 2 (有GAN) → Stage 1 (无GAN)")
+                print(" [跨阶段加载] 将忽略判别器权重")
+                # Filter out discriminator keys
+                filtered_state = {k: v for k, v in state_dict.items() if not k.startswith('discriminator.')}
+                trainer.load_state_dict(filtered_state, strict=False)
+            else:
+                # Same architecture, just load normally
+                print(" [跨阶段加载] 架构相同，加载所有权重")
+                trainer.load_state_dict(state_dict, strict=False)
+
+            print(f" [跨阶段加载] 模型权重加载完成")
+            print(f" [跨阶段加载] 新阶段将从 epoch=0, global_step=0 开始训练（共 {max_epochs} 轮）")
+            print("="*60 + "\n")
+
+            # CRITICAL: Set ckpt_path=None to prevent Lightning from loading checkpoint again
+            ckpt_path = None
+
         pl_trainer.fit(
             model=trainer,
             train_dataloaders=trainer.train_loader,

@@ -28,6 +28,14 @@ logs/
 *.pth
 *.pt
 
+# Deployment artifacts
+onnx/
+artifacts/
+TensorRT-*/
+nv-tensorrt-local-repo-*.deb
+*.trt
+*.plan
+
 # Data and models (tracked externally)
 data/
 models/
